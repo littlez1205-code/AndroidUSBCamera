@@ -291,6 +291,32 @@ int UVCCamera::stopPreview() {
 	RETURN(0, int);
 }
 
+int UVCCamera::setLowLatencyMode(bool enable) {
+	ENTER();
+	int result = EXIT_FAILURE;
+	if (mPreview) {
+		result = mPreview->setLowLatencyMode(enable);
+	}
+	RETURN(result, int);
+}
+
+int UVCCamera::setPreviewTransform(int transform) {
+	ENTER();
+	int result = EXIT_FAILURE;
+	if (mPreview) {
+		result = mPreview->setPreviewTransform(transform);
+	}
+	RETURN(result, int);
+}
+
+int UVCCamera::getPreviewStats(int32_t *stats, int count) {
+	int result = 0;
+	if (mPreview) {
+		result = mPreview->getPreviewStats(stats, count);
+	}
+	return result;
+}
+
 int UVCCamera::setCaptureDisplay(ANativeWindow *capture_window) {
 	ENTER();
 	int result = EXIT_FAILURE;

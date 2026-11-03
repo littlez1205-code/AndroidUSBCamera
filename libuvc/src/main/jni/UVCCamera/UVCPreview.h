@@ -112,6 +112,22 @@ private:
 	void do_capture_idle_loop(JNIEnv *env);
 	void do_capture_callback(JNIEnv *env, uvc_frame_t *frame);
 	void callbackPixelFormatChanged();
+//
+	// low latency display path (used by monitor style apps)
+	volatile bool mLowLatency;
+	volatile int mPreviewTransform;
+	uvc_mjpeg_decoder_t *mMjpegDecoder;
+	// statistics, see getPreviewStats
+	volatile uint32_t mStatFramesReceived;
+	volatile uint32_t mStatFramesDrawn;
+	volatile uint32_t mStatFramesDropped;
+	volatile uint32_t mStatDecodeUsAvg;
+	volatile int32_t mStreamState;
+	volatile uint32_t mFrameInterval;
+	int windowFormat() const;
+	void applyBuffersTransform(ANativeWindow *window);
+	void do_preview_low_latency();
+	int draw_low_latency(uvc_frame_t *frame);
 public:
 	UVCPreview(uvc_device_handle_t *devh);
 	~UVCPreview();
@@ -124,6 +140,16 @@ public:
 	int stopPreview();
 	inline const bool isCapturing() const;
 	int setCaptureDisplay(ANativeWindow *capture_window);
+	/**
+	 * low latency mode: only the newest frame is kept, frames are decoded
+	 * straight into the preview window and frame callback / capture are not used.
+	 * must be called before startPreview
+	 */
+	int setLowLatencyMode(bool enable);
+	/** set ANativeWindow buffer transform (ANATIVEWINDOW_TRANSFORM_*) used for the preview window */
+	int setPreviewTransform(int transform);
+	/** copy preview statistics into stats, returns the number of values written */
+	int getPreviewStats(int32_t *stats, int count);
 };
 
 #endif /* UVCPREVIEW_H_ */

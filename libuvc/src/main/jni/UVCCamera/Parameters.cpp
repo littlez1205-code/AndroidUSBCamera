@@ -368,6 +368,18 @@ char *UVCDiags::getSupportedSize(const uvc_device_handle_t *deviceHandle) {
 							write(writer, "index", fmt_desc->bFormatIndex);
 							write(writer, "type", fmt_desc->bDescriptorSubtype);
 							write(writer, "default", fmt_desc->bDefaultFrameIndex);
+							// four character code of the pixel format, e.g. "YUY2", "NV12", "MJPG"
+							if (fmt_desc->bDescriptorSubtype == UVC_VS_FORMAT_MJPEG) {
+								write(writer, "fourcc", "MJPG");
+							} else {
+								char fourcc[5];
+								for (int i = 0; i < 4; i++) {
+									const uint8_t c = fmt_desc->guidFormat[i];
+									fourcc[i] = ((c >= 0x20) && (c < 0x7f)) ? (char)c : '?';
+								}
+								fourcc[4] = '\0';
+								write(writer, "fourcc", fourcc);
+							}
 							writer.String("size");
 							writer.StartArray();
 							DL_FOREACH(fmt_desc->frame_descs, frame_desc)
@@ -375,6 +387,29 @@ char *UVCDiags::getSupportedSize(const uvc_device_handle_t *deviceHandle) {
 								snprintf(buf, sizeof(buf), "%dx%d", frame_desc->wWidth, frame_desc->wHeight);
 								buf[sizeof(buf)-1] = '\0';
 								writer.String(buf);
+							}
+							writer.EndArray();
+							// frame rates of each size, same order as "size"
+							writer.String("fps");
+							writer.StartArray();
+							DL_FOREACH(fmt_desc->frame_descs, frame_desc)
+							{
+								writer.StartArray();
+								if (frame_desc->intervals) {
+									for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
+										writer.Int((int)((10000000 + *interval / 2) / *interval));
+									}
+								} else {
+									// continuous intervals: highest and lowest frame rate
+									if (frame_desc->dwMinFrameInterval) {
+										writer.Int((int)((10000000 + frame_desc->dwMinFrameInterval / 2) / frame_desc->dwMinFrameInterval));
+									}
+									if (frame_desc->dwMaxFrameInterval
+										&& (frame_desc->dwMaxFrameInterval != frame_desc->dwMinFrameInterval)) {
+										writer.Int((int)((10000000 + frame_desc->dwMaxFrameInterval / 2) / frame_desc->dwMaxFrameInterval));
+									}
+								}
+								writer.EndArray();
 							}
 							writer.EndArray();
 							break;

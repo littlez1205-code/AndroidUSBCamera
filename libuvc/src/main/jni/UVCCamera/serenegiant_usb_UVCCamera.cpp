@@ -263,6 +263,48 @@ static jint nativeSetPreviewDisplay(JNIEnv *env, jobject thiz,
 	RETURN(result, jint);
 }
 
+static jint nativeSetLowLatencyMode(JNIEnv *env, jobject thiz,
+	ID_TYPE id_camera, jboolean enable) {
+
+	jint result = JNI_ERR;
+	ENTER();
+	UVCCamera *camera = reinterpret_cast<UVCCamera *>(id_camera);
+	if (LIKELY(camera)) {
+		result = camera->setLowLatencyMode(enable == JNI_TRUE);
+	}
+	RETURN(result, jint);
+}
+
+static jint nativeSetPreviewTransform(JNIEnv *env, jobject thiz,
+	ID_TYPE id_camera, jint transform) {
+
+	jint result = JNI_ERR;
+	ENTER();
+	UVCCamera *camera = reinterpret_cast<UVCCamera *>(id_camera);
+	if (LIKELY(camera)) {
+		result = camera->setPreviewTransform(transform);
+	}
+	RETURN(result, jint);
+}
+
+static jint nativeGetPreviewStats(JNIEnv *env, jobject thiz,
+	ID_TYPE id_camera, jintArray stats_array) {
+
+	jint result = 0;
+	UVCCamera *camera = reinterpret_cast<UVCCamera *>(id_camera);
+	if (LIKELY(camera && stats_array)) {
+		int32_t stats[16];
+		int n = camera->getPreviewStats(stats, 16);
+		const jsize len = env->GetArrayLength(stats_array);
+		if (n > len) n = len;
+		if (n > 0) {
+			env->SetIntArrayRegion(stats_array, 0, n, reinterpret_cast<const jint *>(stats));
+		}
+		result = n;
+	}
+	return result;
+}
+
 static jint nativeSetFrameCallback(JNIEnv *env, jobject thiz,
 	ID_TYPE id_camera, jobject jIFrameCallback, jint pixel_format) {
 
@@ -2041,6 +2083,9 @@ static JNINativeMethod methods[] = {
 	{ "nativeStopPreview",				"(J)I", (void *) nativeStopPreview },
 	{ "nativeSetPreviewDisplay",		"(JLandroid/view/Surface;)I", (void *) nativeSetPreviewDisplay },
 	{ "nativeSetFrameCallback",			"(JLcom/jiangdg/uvc/IFrameCallback;I)I", (void *) nativeSetFrameCallback },
+	{ "nativeSetLowLatencyMode",		"(JZ)I", (void *) nativeSetLowLatencyMode },
+	{ "nativeSetPreviewTransform",		"(JI)I", (void *) nativeSetPreviewTransform },
+	{ "nativeGetPreviewStats",			"(J[I)I", (void *) nativeGetPreviewStats },
 
 	{ "nativeSetCaptureDisplay",		"(JLandroid/view/Surface;)I", (void *) nativeSetCaptureDisplay },
 

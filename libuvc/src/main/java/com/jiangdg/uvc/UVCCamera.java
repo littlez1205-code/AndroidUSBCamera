@@ -58,7 +58,26 @@ public class UVCCamera {
 	public static final int PIXEL_FORMAT_RGB565 = 2;
 	public static final int PIXEL_FORMAT_RGBX = 3;
 	public static final int PIXEL_FORMAT_YUV420SP = 4;	// NV12
-	public static final int PIXEL_FORMAT_NV21 = 5;		// = YVU420SemiPlanar,NV21，但是保存到jpg颜色失真
+	public static final int PIXEL_FORMAT_NV21 = 5;
+
+	/** preview buffer transforms, same values as ANATIVEWINDOW_TRANSFORM_* (needs Android 8.0+) */
+	public static final int PREVIEW_TRANSFORM_NONE = 0x00;
+	public static final int PREVIEW_TRANSFORM_ROTATE_90 = 0x04;
+	public static final int PREVIEW_TRANSFORM_ROTATE_180 = 0x03;
+	public static final int PREVIEW_TRANSFORM_ROTATE_270 = 0x07;
+
+	/** indexes of the values returned by {@link #getPreviewStats(int[])} */
+	public static final int STAT_FRAMES_RECEIVED = 0;
+	public static final int STAT_FRAMES_DRAWN = 1;
+	public static final int STAT_FRAMES_DROPPED = 2;
+	public static final int STAT_DRAW_TIME_US = 3;
+	public static final int STAT_WIDTH = 4;
+	public static final int STAT_HEIGHT = 5;
+	public static final int STAT_FRAME_FORMAT = 6;
+	public static final int STAT_FPS_X100 = 7;
+	public static final int STAT_STREAM_STATE = 8;
+	public static final int STAT_LOW_LATENCY = 9;
+	public static final int STAT_COUNT = 10;		// = YVU420SemiPlanar,NV21，但是保存到jpg颜色失真
 
 	//--------------------------------------------------------------------------------
     public static final int	CTRL_SCANNING		= 0x00000001;	// D0:  Scanning Mode
@@ -437,6 +456,40 @@ public class UVCCamera {
     	if (mNativePtr != 0) {
         	nativeSetFrameCallback(mNativePtr, callback, pixelFormat);
     	}
+    }
+
+    /**
+     * Low latency display mode, made for showing a capture card like a monitor.
+     * Only the newest frame is kept and frames are decoded straight into the
+     * preview Surface. Frame callback and capture surface are not used in this mode.
+     * Call before {@link #startPreview()}.
+     */
+    public synchronized void setLowLatencyMode(final boolean enable) {
+    	if (mNativePtr != 0) {
+    		nativeSetLowLatencyMode(mNativePtr, enable);
+    	}
+    }
+
+    /**
+     * Rotate the preview buffers, one of PREVIEW_TRANSFORM_*.
+     * The Surface keeps its size, the content is rotated when composited.
+     */
+    public synchronized void setPreviewTransform(final int transform) {
+    	if (mNativePtr != 0) {
+    		nativeSetPreviewTransform(mNativePtr, transform);
+    	}
+    }
+
+    /**
+     * Copy preview statistics, see STAT_* for the meaning of each value.
+     * Counters keep increasing while previewing, compare two calls to get a frame rate.
+     * @return number of values written
+     */
+    public synchronized int getPreviewStats(final int[] stats) {
+    	if ((mNativePtr != 0) && (stats != null)) {
+    		return nativeGetPreviewStats(mNativePtr, stats);
+    	}
+    	return 0;
     }
 
     /**
@@ -1093,6 +1146,9 @@ public class UVCCamera {
 	private static final native int nativeStartPreview(final long id_camera);
 	private static final native int nativeStopPreview(final long id_camera);
 	private static final native int nativeSetPreviewDisplay(final long id_camera, final Surface surface);
+	private static final native int nativeSetLowLatencyMode(final long id_camera, final boolean enable);
+	private static final native int nativeSetPreviewTransform(final long id_camera, final int transform);
+	private static final native int nativeGetPreviewStats(final long id_camera, final int[] stats);
 	private static final native int nativeSetFrameCallback(final long mNativePtr, final IFrameCallback callback, final int pixelFormat);
 
 //**********************************************************************

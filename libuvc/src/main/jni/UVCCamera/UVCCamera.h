@@ -195,6 +195,9 @@ public:
 	int startPreview();
 	int stopPreview();
 	int setCaptureDisplay(ANativeWindow *capture_window);
+	int setLowLatencyMode(bool enable);
+	int setPreviewTransform(int transform);
+	int getPreviewStats(int32_t *stats, int count);
 
 	int getCtrlSupports(uint64_t *supports);
 	int getProcSupports(uint64_t *supports);

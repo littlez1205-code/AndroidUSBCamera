@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+
+// CI passes the run number so that every build installs over the previous one
+def ciBuildNumber = System.getenv("GITHUB_RUN_NUMBER")
+
+android {
+    namespace = "com.littlez.usbdisplay"
+    compileSdkVersion rootProject.ext.versionCompiler
+    ndkVersion rootProject.ext.ndkVersion
+
+    defaultConfig {
+        applicationId "com.littlez.usbdisplay"
+        minSdkVersion 26
+        targetSdkVersion rootProject.ext.versionTarget
+        versionCode ciBuildNumber ? ciBuildNumber.toInteger() : 1
+        versionName ciBuildNumber ? "1.0.${ciBuildNumber}" : "1.0.dev"
+
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    signingConfigs {
+        // fixed key committed to the repository so that new builds can be installed
+        // over old ones; this app is meant for personal side loading only
+        shared {
+            storeFile file('signing/usbdisplay.jks')
+            storePassword 'usbdisplay'
+            keyAlias 'usbdisplay'
+            keyPassword 'usbdisplay'
+        }
+    }
+
+    buildTypes {
+        release {
+            // release build: native code is compiled with optimizations, needed for 60fps
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+        debug {
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    implementation project(':libuvc')
+}

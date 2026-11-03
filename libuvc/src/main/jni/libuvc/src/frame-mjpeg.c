@@ -550,3 +550,117 @@ fail:
 	return lines_read == out->height ? UVC_SUCCESS : UVC_ERROR_OTHER+1;
 }
 
+
+//======================================================================
+// Reusable MJPEG decoder that writes RGBA pixels straight into a caller
+// supplied buffer (for example a locked ANativeWindow buffer).
+//
+// Decoding happens in two steps so that a broken frame can be rejected
+// before the caller locks its output buffer:
+//   1. uvc_mjpeg_decoder_start(): parse the header and start decoding
+//   2. uvc_mjpeg_decoder_read():  write the scanlines into the buffer
+// The decompressor instance is reused between frames to avoid
+// allocating libjpeg state for every frame.
+//======================================================================
+struct uvc_mjpeg_decoder {
+	struct jpeg_decompress_struct dinfo;
+	struct error_mgr jerr;
+	int created;
+	int started;
+};
+
+uvc_mjpeg_decoder_t *uvc_mjpeg_decoder_create(void) {
+	uvc_mjpeg_decoder_t *dec = (uvc_mjpeg_decoder_t *)calloc(1, sizeof(uvc_mjpeg_decoder_t));
+	if (UNLIKELY(!dec))
+		return NULL;
+	dec->dinfo.err = jpeg_std_error(&dec->jerr.super);
+	dec->jerr.super.error_exit = _error_exit;
+	if (setjmp(dec->jerr.jmp)) {
+		if (dec->created)
+			jpeg_destroy_decompress(&dec->dinfo);
+		free(dec);
+		return NULL;
+	}
+	jpeg_create_decompress(&dec->dinfo);
+	dec->created = 1;
+	return dec;
+}
+
+void uvc_mjpeg_decoder_destroy(uvc_mjpeg_decoder_t *dec) {
+	if (!dec)
+		return;
+	if (dec->created)
+		jpeg_destroy_decompress(&dec->dinfo);
+	free(dec);
+}
+
+uvc_error_t uvc_mjpeg_decoder_start(uvc_mjpeg_decoder_t *dec, uvc_frame_t *in,
+		int *out_width, int *out_height) {
+
+	if (UNLIKELY(!dec || !dec->created || !in || !in->data))
+		return UVC_ERROR_INVALID_PARAM;
+	if (UNLIKELY(in->frame_format != UVC_FRAME_FORMAT_MJPEG || in->actual_bytes < 4))
+		return UVC_ERROR_INVALID_PARAM;
+	const uint8_t *p = (const uint8_t *)in->data;
+	if (UNLIKELY((p[0] != 0xff) || (p[1] != 0xd8)))	// no SOI marker, broken frame
+		return UVC_ERROR_INVALID_PARAM;
+
+	j_decompress_ptr dinfo = &dec->dinfo;
+	if (dec->started) {
+		jpeg_abort_decompress(dinfo);
+		dec->started = 0;
+	}
+	if (setjmp(dec->jerr.jmp)) {
+		jpeg_abort_decompress(dinfo);
+		dec->started = 0;
+		return UVC_ERROR_OTHER;
+	}
+	jpeg_mem_src(dinfo, (unsigned char *)in->data, in->actual_bytes);
+	jpeg_read_header(dinfo, TRUE);
+	if (dinfo->dc_huff_tbl_ptrs[0] == NULL) {
+		/* This frame is missing the Huffman tables: fill in the standard ones */
+		insert_huff_tables(dinfo);
+	}
+	dinfo->out_color_space = JCS_EXT_RGBA;	// alpha is always 0xff
+	dinfo->dct_method = JDCT_ISLOW;			// accurate, SIMD accelerated, keeps text sharp
+	jpeg_start_decompress(dinfo);
+	dec->started = 1;
+	if (out_width)
+		*out_width = (int)dinfo->output_width;
+	if (out_height)
+		*out_height = (int)dinfo->output_height;
+	return UVC_SUCCESS;
+}
+
+uvc_error_t uvc_mjpeg_decoder_read(uvc_mjpeg_decoder_t *dec,
+		uint8_t *dst, int dst_stride, int max_lines) {
+
+	if (UNLIKELY(!dec || !dec->started || !dst || (dst_stride <= 0)))
+		return UVC_ERROR_INVALID_PARAM;
+	j_decompress_ptr dinfo = &dec->dinfo;
+	JSAMPROW rows[MAX_READLINE];
+	if (setjmp(dec->jerr.jmp)) {
+		jpeg_abort_decompress(dinfo);
+		dec->started = 0;
+		return UVC_ERROR_OTHER;
+	}
+	const int height = (int)dinfo->output_height < max_lines ? (int)dinfo->output_height : max_lines;
+	while ((int)dinfo->output_scanline < height) {
+		const int line = (int)dinfo->output_scanline;
+		const int remain = height - line;
+		const int n = remain < MAX_READLINE ? remain : MAX_READLINE;
+		int i;
+		for (i = 0; i < n; i++) {
+			rows[i] = dst + (size_t)(line + i) * (size_t)dst_stride;
+		}
+		if (UNLIKELY(!jpeg_read_scanlines(dinfo, rows, n)))
+			break;
+	}
+	if ((int)dinfo->output_scanline >= (int)dinfo->output_height) {
+		jpeg_finish_decompress(dinfo);
+	} else {
+		jpeg_abort_decompress(dinfo);
+	}
+	dec->started = 0;
+	return UVC_SUCCESS;
+}

@@ -1,0 +1,68 @@
+# Builds the "USB 显示器" app (monitor module) and publishes the APK.
+# Download: the "monitor-latest" release of this repository, or the
+# "USB-Display-apk" artifact of a workflow run.
+name: USB 显示器 APK
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'images/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK, CMake and platform
+        run: sdkmanager --install "ndk;28.1.13356709" "cmake;3.22.1" "platforms;android-36" "build-tools;35.0.0" > /dev/null
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :monitor:assembleRelease --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp monitor/build/outputs/apk/release/monitor-release.apk out/USB-Display.apk
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: USB-Display-apk
+          path: out/USB-Display.apk
+
+      - name: Publish to the monitor-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="USB 显示器 最新构建：第 ${GITHUB_RUN_NUMBER} 次构建，分支 ${GITHUB_REF_NAME}，提交 ${GITHUB_SHA::7}。
+          用手机浏览器打开本页，下载 USB-Display.apk 安装即可。"
+          if ! gh release view monitor-latest > /dev/null 2>&1; then
+            gh release create monitor-latest --prerelease --target "$GITHUB_SHA" \
+              --title "USB 显示器（最新版）" --notes "$NOTES"
+          else
+            gh release edit monitor-latest --notes "$NOTES"
+          fi
+          gh release upload monitor-latest out/USB-Display.apk --clobber

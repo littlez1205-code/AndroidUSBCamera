@@ -25,6 +25,15 @@
 #include <stdlib.h>
 #include <linux/time.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <sys/resource.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+	#include <arm_neon.h>
+	#define UVC_HAS_NEON 1
+#else
+	#define UVC_HAS_NEON 0
+#endif
 
 #if 1	// set 1 if you don't need debug log
 	#ifndef LOG_NDEBUG
@@ -70,7 +79,16 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	captureQueu(NULL),
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
-	callbackPixelBytes(2) {
+	callbackPixelBytes(2),
+	mLowLatency(false),
+	mPreviewTransform(0),
+	mMjpegDecoder(NULL),
+	mStatFramesReceived(0),
+	mStatFramesDrawn(0),
+	mStatFramesDropped(0),
+	mStatDecodeUsAvg(0),
+	mStreamState(0),
+	mFrameInterval(0) {
 
 	ENTER();
 	pthread_cond_init(&preview_sync, NULL);
@@ -97,6 +115,10 @@ UVCPreview::~UVCPreview() {
 	clearPreviewFrame();
 	clearCaptureFrame();
 	clear_pool();
+	if (mMjpegDecoder) {
+		uvc_mjpeg_decoder_destroy(mMjpegDecoder);
+		mMjpegDecoder = NULL;
+	}
 	pthread_mutex_lock(&preview_mutex);
 	pthread_mutex_destroy(&preview_mutex);
 	pthread_cond_destroy(&preview_sync);
@@ -180,18 +202,26 @@ int UVCPreview::setPreviewSize(int width, int height, int min_fps, int max_fps, 
 	ENTER();
 	
 	int result = 0;
-	if ((requestWidth != width) || (requestHeight != height) || (requestMode != mode)) {
-		requestWidth = width;
-		requestHeight = height;
-		requestMinFps = min_fps;
-		requestMaxFps = max_fps;
-		requestMode = mode;
-		requestBandwidth = bandwidth;
+	// fps and bandwidth have to be compared too, otherwise a request that only
+	// changes the frame rate (e.g. 30fps -> 60fps) is silently ignored.
+	if ((requestWidth != width) || (requestHeight != height) || (requestMode != mode)
+		|| (requestMinFps != min_fps) || (requestMaxFps != max_fps)
+		|| (requestBandwidth != bandwidth)) {
 
 		uvc_stream_ctrl_t ctrl;
 		result = uvc_get_stream_ctrl_format_size_fps(mDeviceHandle, &ctrl,
-			!requestMode ? UVC_FRAME_FORMAT_YUYV : UVC_FRAME_FORMAT_MJPEG,
-			requestWidth, requestHeight, requestMinFps, requestMaxFps);
+			!mode ? UVC_FRAME_FORMAT_YUYV : UVC_FRAME_FORMAT_MJPEG,
+			width, height, min_fps, max_fps);
+		// keep the request only when the camera accepted it, so that a failed
+		// request is not treated as already applied on the next call
+		if (LIKELY(!result)) {
+			requestWidth = width;
+			requestHeight = height;
+			requestMinFps = min_fps;
+			requestMaxFps = max_fps;
+			requestMode = mode;
+			requestBandwidth = bandwidth;
+		}
 	}
 	
 	RETURN(result, int);
@@ -207,12 +237,97 @@ int UVCPreview::setPreviewDisplay(ANativeWindow *preview_window) {
 			mPreviewWindow = preview_window;
 			if (LIKELY(mPreviewWindow)) {
 				ANativeWindow_setBuffersGeometry(mPreviewWindow,
-					frameWidth, frameHeight, previewFormat);
+					frameWidth, frameHeight, windowFormat());
+				applyBuffersTransform(mPreviewWindow);
 			}
+		} else if (preview_window) {
+			// same window again: drop the extra reference taken by ANativeWindow_fromSurface
+			ANativeWindow_release(preview_window);
 		}
 	}
 	pthread_mutex_unlock(&preview_mutex);
 	RETURN(0, int);
+}
+
+int UVCPreview::windowFormat() const {
+	// opaque format lets the compositor skip blending in low latency mode
+	return mLowLatency ? WINDOW_FORMAT_RGBX_8888 : previewFormat;
+}
+
+typedef int32_t (*set_buffers_transform_t)(ANativeWindow *window, int32_t transform);
+static set_buffers_transform_t sSetBuffersTransform = NULL;
+static pthread_once_t sSetBuffersTransformOnce = PTHREAD_ONCE_INIT;
+
+static void resolveSetBuffersTransform() {
+	// ANativeWindow_setBuffersTransform is available since API 26, resolve it at runtime
+	// so that the library still loads on older devices
+	void *lib = dlopen("libandroid.so", RTLD_NOW);
+	if (lib) {
+		sSetBuffersTransform = (set_buffers_transform_t)dlsym(lib, "ANativeWindow_setBuffersTransform");
+	}
+	if (!sSetBuffersTransform) {
+		LOGW("ANativeWindow_setBuffersTransform is not available");
+	}
+}
+
+// call with preview_mutex locked
+void UVCPreview::applyBuffersTransform(ANativeWindow *window) {
+	if (!window) return;
+	pthread_once(&sSetBuffersTransformOnce, resolveSetBuffersTransform);
+	if (sSetBuffersTransform) {
+		const int32_t r = sSetBuffersTransform(window, mPreviewTransform);
+		if (r) {
+			LOGW("ANativeWindow_setBuffersTransform(%d) failed:%d", mPreviewTransform, r);
+		}
+	}
+}
+
+int UVCPreview::setLowLatencyMode(bool enable) {
+	ENTER();
+	pthread_mutex_lock(&preview_mutex);
+	{
+		mLowLatency = enable;
+		if (mPreviewWindow) {
+			ANativeWindow_setBuffersGeometry(mPreviewWindow,
+				frameWidth, frameHeight, windowFormat());
+		}
+	}
+	pthread_mutex_unlock(&preview_mutex);
+	RETURN(0, int);
+}
+
+int UVCPreview::setPreviewTransform(int transform) {
+	ENTER();
+	pthread_mutex_lock(&preview_mutex);
+	{
+		mPreviewTransform = transform;
+		applyBuffersTransform(mPreviewWindow);
+	}
+	pthread_mutex_unlock(&preview_mutex);
+	RETURN(0, int);
+}
+
+int UVCPreview::getPreviewStats(int32_t *stats, int count) {
+	if (!stats || (count <= 0)) return 0;
+	const uint32_t interval = mFrameInterval;
+	const int32_t values[] = {
+		(int32_t)mStatFramesReceived,		// 0: frames received from the camera
+		(int32_t)mStatFramesDrawn,			// 1: frames drawn to the preview window
+		(int32_t)mStatFramesDropped,		// 2: frames skipped to keep latency low
+		(int32_t)mStatDecodeUsAvg,			// 3: average decode + draw time [us]
+		frameWidth,							// 4: negotiated width
+		frameHeight,						// 5: negotiated height
+		frameMode,							// 6: 0: YUYV, 1: MJPEG
+		interval ? (int32_t)((1000000000LL + interval / 2) / interval) : 0,	// 7: negotiated fps x 100
+		mStreamState,						// 8: 0: idle, 1: streaming, <0: error
+		mLowLatency ? 1 : 0,				// 9: low latency mode
+	};
+	const int n = (int)(sizeof(values) / sizeof(values[0]));
+	const int m = count < n ? count : n;
+	for (int i = 0; i < m; i++) {
+		stats[i] = values[i];
+	}
+	return m;
 }
 
 int UVCPreview::setFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pixel_format) {
@@ -365,7 +480,9 @@ int UVCPreview::stopPreview() {
 	bool b = isRunning();
 	if (LIKELY(b)) {
 		mIsRunning = false;
-        pthread_cond_signal(&preview_sync);
+		pthread_mutex_lock(&preview_mutex);
+		pthread_cond_signal(&preview_sync);
+		pthread_mutex_unlock(&preview_mutex);
         // jiangdg:fix stopview crash
         // because of capture_thread may null when called do_preview()
 		if (mHasCapturing) {
@@ -380,6 +497,7 @@ int UVCPreview::stopPreview() {
 		clearDisplay();
 	}
 	mHasCapturing = false;
+	mStreamState = 0;
 	clearPreviewFrame();
 	clearCaptureFrame();
 	// check preview mutex available
@@ -417,6 +535,7 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 #endif
 		return;
 	}
+	preview->mStatFramesReceived++;
 	if (LIKELY(preview->isRunning())) {
 		uvc_frame_t *copy = preview->get_frame(frame->data_bytes);
 		if (UNLIKELY(!copy)) {
@@ -437,14 +556,29 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 void UVCPreview::addPreviewFrame(uvc_frame_t *frame) {
 
 	pthread_mutex_lock(&preview_mutex);
-	if (isRunning() && (previewFrames.size() < MAX_FRAME)) {
-		previewFrames.put(frame);
-		frame = NULL;
-		pthread_cond_signal(&preview_sync);
+	if (isRunning()) {
+		if (mLowLatency) {
+			// keep only the newest frame: when drawing can not keep up,
+			// skip old frames instead of letting the delay grow
+			const int n = previewFrames.size();
+			for (int i = 0; i < n; i++) {
+				recycle_frame(previewFrames[i]);
+				mStatFramesDropped++;
+			}
+			previewFrames.clear();
+			previewFrames.put(frame);
+			frame = NULL;
+			pthread_cond_signal(&preview_sync);
+		} else if (previewFrames.size() < MAX_FRAME) {
+			previewFrames.put(frame);
+			frame = NULL;
+			pthread_cond_signal(&preview_sync);
+		}
 	}
 	pthread_mutex_unlock(&preview_mutex);
 	if (frame) {
 		recycle_frame(frame);
+		mStatFramesDropped++;
 	}
 }
 
@@ -452,8 +586,16 @@ uvc_frame_t *UVCPreview::waitPreviewFrame() {
 	uvc_frame_t *frame = NULL;
 	pthread_mutex_lock(&preview_mutex);
 	{
-		if (!previewFrames.size()) {
-			pthread_cond_wait(&preview_sync, &preview_mutex);
+		if (isRunning() && !previewFrames.size()) {
+			// timed wait so that a missed wakeup can never block stopPreview forever
+			struct timespec deadline;
+			clock_gettime(CLOCK_REALTIME, &deadline);
+			deadline.tv_nsec += 200 * 1000000L;
+			if (deadline.tv_nsec >= 1000000000L) {
+				deadline.tv_sec += 1;
+				deadline.tv_nsec -= 1000000000L;
+			}
+			pthread_cond_timedwait(&preview_sync, &preview_mutex, &deadline);
 		}
 		if (LIKELY(isRunning() && previewFrames.size() > 0)) {
 			frame = previewFrames.remove(0);
@@ -483,6 +625,8 @@ void *UVCPreview::preview_thread_func(void *vptr_args) {
 		result = preview->prepare_preview(&ctrl);
 		if (LIKELY(!result)) {
 			preview->do_preview(&ctrl);
+		} else {
+			preview->mStreamState = result < 0 ? result : -1;
 		}
 	}
 	PRE_EXIT();
@@ -510,13 +654,16 @@ int UVCPreview::prepare_preview(uvc_stream_ctrl_t *ctrl) {
 			pthread_mutex_lock(&preview_mutex);
 			if (LIKELY(mPreviewWindow)) {
 				ANativeWindow_setBuffersGeometry(mPreviewWindow,
-					frameWidth, frameHeight, previewFormat);
+					frameWidth, frameHeight, windowFormat());
+				applyBuffersTransform(mPreviewWindow);
 			}
 			pthread_mutex_unlock(&preview_mutex);
 		} else {
 			frameWidth = requestWidth;
 			frameHeight = requestHeight;
 		}
+		mFrameInterval = ctrl->dwFrameInterval;
+		LOGI("frameInterval=%u(%d..%d fps requested)", ctrl->dwFrameInterval, requestMinFps, requestMaxFps);
 		frameMode = requestMode;
 		frameBytes = frameWidth * frameHeight * (!requestMode ? 2 : 4);
 		previewBytes = frameWidth * frameHeight * PREVIEW_PIXEL_BYTES;
@@ -538,6 +685,12 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
     mHasCapturing = false;
 	if (LIKELY(!result)) {
 		clearPreviewFrame();
+		mStreamState = 1;
+	}
+	if (LIKELY(!result) && mLowLatency) {
+		do_preview_low_latency();
+		uvc_stop_streaming(mDeviceHandle);
+	} else if (LIKELY(!result)) {
 		if (pthread_create(&capture_thread, NULL, capture_thread_func, (void *)this) == 0) {
 		    mHasCapturing = true;
 		}
@@ -580,7 +733,187 @@ void UVCPreview::do_preview(uvc_stream_ctrl_t *ctrl) {
 		LOGI("Streaming finished");
 #endif
 	} else {
+		mStreamState = result < 0 ? result : -1;
 		uvc_perror(result, "failed start_streaming");
+	}
+
+	EXIT();
+}
+
+//======================================================================
+// low latency display path
+//======================================================================
+static inline int64_t monotonic_us() {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (int64_t)t.tv_sec * 1000000LL + t.tv_nsec / 1000;
+}
+
+// limited range YUV -> RGB coefficients with 6 fractional bits (x64)
+typedef struct {
+	int16_t rv;	// V -> R
+	int16_t gu;	// U -> G
+	int16_t gv;	// V -> G
+	int16_t bu;	// U -> B
+} yuv_coeffs_t;
+
+static const yuv_coeffs_t kYuvBt709 = { 115, 14, 34, 135 };	// HD sources
+static const yuv_coeffs_t kYuvBt601 = { 102, 25, 52, 129 };	// SD sources
+#define YUV_Y_GAIN 149	// 1.164383 x 128
+
+static inline uint8_t sat_shift6(const int32_t v) {
+	const int32_t x = (v + 32) >> 6;
+	return (uint8_t)(x < 0 ? 0 : (x > 255 ? 255 : x));
+}
+
+/**
+ * YUYV(YUY2) -> RGBA8888, written row by row into the destination (e.g. a locked window buffer).
+ * The NEON path converts 16 pixels per loop and gives the same result as the scalar path.
+ */
+static void yuyv_to_rgba_rows(const uint8_t *src, const int src_stride,
+	uint8_t *dst, const int dst_stride, const int width, const int height, const yuv_coeffs_t *k) {
+
+	for (int h = 0; h < height; h++) {
+		const uint8_t *s = src + (size_t)h * src_stride;
+		uint8_t *d = dst + (size_t)h * dst_stride;
+		int x = 0;
+#if UVC_HAS_NEON
+		const uint8x8_t k16 = vdup_n_u8(16);
+		const uint8x8_t kY = vdup_n_u8(YUV_Y_GAIN);
+		const int16x8_t k128 = vdupq_n_s16(128);
+		const uint8x8_t alpha = vdup_n_u8(255);
+		for (; x + 16 <= width; x += 16, s += 32, d += 64) {
+			// val[0]: Y0, val[1]: U, val[2]: Y1, val[3]: V of 8 pixel pairs
+			const uint8x8x4_t yuyv = vld4_u8(s);
+			const int16x8_t u = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(yuyv.val[1])), k128);
+			const int16x8_t v = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(yuyv.val[3])), k128);
+			const int16x8_t rv = vmulq_n_s16(v, k->rv);
+			const int16x8_t guv = vaddq_s16(vmulq_n_s16(u, k->gu), vmulq_n_s16(v, k->gv));
+			const int16x8_t bu = vmulq_n_s16(u, k->bu);
+			const int16x8_t y0 = vreinterpretq_s16_u16(vshrq_n_u16(vmull_u8(vqsub_u8(yuyv.val[0], k16), kY), 1));
+			const int16x8_t y1 = vreinterpretq_s16_u16(vshrq_n_u16(vmull_u8(vqsub_u8(yuyv.val[2], k16), kY), 1));
+			// interleave even / odd pixels back into pixel order
+			const uint8x8x2_t r = vzip_u8(vqrshrun_n_s16(vqaddq_s16(y0, rv), 6), vqrshrun_n_s16(vqaddq_s16(y1, rv), 6));
+			const uint8x8x2_t g = vzip_u8(vqrshrun_n_s16(vqsubq_s16(y0, guv), 6), vqrshrun_n_s16(vqsubq_s16(y1, guv), 6));
+			const uint8x8x2_t b = vzip_u8(vqrshrun_n_s16(vqaddq_s16(y0, bu), 6), vqrshrun_n_s16(vqaddq_s16(y1, bu), 6));
+			uint8x8x4_t px;
+			px.val[0] = r.val[0]; px.val[1] = g.val[0]; px.val[2] = b.val[0]; px.val[3] = alpha;
+			vst4_u8(d, px);
+			px.val[0] = r.val[1]; px.val[1] = g.val[1]; px.val[2] = b.val[1];
+			vst4_u8(d + 32, px);
+		}
+#endif
+		for (; x + 2 <= width; x += 2, s += 4, d += 8) {
+			const int32_t u = (int32_t)s[1] - 128;
+			const int32_t v = (int32_t)s[3] - 128;
+			const int32_t rv = v * k->rv;
+			const int32_t guv = u * k->gu + v * k->gv;
+			const int32_t bu = u * k->bu;
+			const int32_t y0 = ((s[0] > 16 ? s[0] - 16 : 0) * YUV_Y_GAIN) >> 1;
+			const int32_t y1 = ((s[2] > 16 ? s[2] - 16 : 0) * YUV_Y_GAIN) >> 1;
+			// RGBA byte order in memory (little endian)
+			const uint32_t p0 = (uint32_t)sat_shift6(y0 + rv) | ((uint32_t)sat_shift6(y0 - guv) << 8)
+				| ((uint32_t)sat_shift6(y0 + bu) << 16) | 0xff000000u;
+			const uint32_t p1 = (uint32_t)sat_shift6(y1 + rv) | ((uint32_t)sat_shift6(y1 - guv) << 8)
+				| ((uint32_t)sat_shift6(y1 + bu) << 16) | 0xff000000u;
+			memcpy(d, &p0, 4);
+			memcpy(d + 4, &p1, 4);
+		}
+	}
+}
+
+static inline bool is_rgba_window_format(const int32_t format) {
+	return (format == WINDOW_FORMAT_RGBX_8888) || (format == WINDOW_FORMAT_RGBA_8888);
+}
+
+/**
+ * decode/convert one frame directly into the preview window buffer,
+ * no intermediate frame and no extra copy
+ */
+int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
+	ANativeWindow *window = NULL;
+	pthread_mutex_lock(&preview_mutex);
+	{
+		// keep our own reference so that preview_mutex is not held while decoding,
+		// otherwise the USB callback thread would be blocked
+		window = mPreviewWindow;
+		if (window) {
+			ANativeWindow_acquire(window);
+		}
+	}
+	pthread_mutex_unlock(&preview_mutex);
+	if (UNLIKELY(!window)) {
+		return -1;
+	}
+
+	const int64_t start = monotonic_us();
+	int result = -1;
+	ANativeWindow_Buffer buffer;
+	if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
+		if (UNLIKELY(!mMjpegDecoder)) {
+			mMjpegDecoder = uvc_mjpeg_decoder_create();
+		}
+		int w = 0, h = 0;
+		// parse the header before locking the window so that broken frames are dropped
+		if (LIKELY(mMjpegDecoder)
+			&& !uvc_mjpeg_decoder_start(mMjpegDecoder, frame, &w, &h)) {
+
+			if (LIKELY(ANativeWindow_lock(window, &buffer, NULL) == 0)) {
+				if (LIKELY((w <= buffer.width) && (h <= buffer.height)
+					&& is_rgba_window_format(buffer.format))) {
+
+					result = uvc_mjpeg_decoder_read(mMjpegDecoder,
+						(uint8_t *)buffer.bits, buffer.stride * 4, buffer.height);
+				}
+				ANativeWindow_unlockAndPost(window);
+			}
+		}
+	} else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
+		const int w = frame->width;
+		const int h = frame->height;
+		const int src_stride = frame->step ? (int)frame->step : w * 2;
+		if (LIKELY(frame->actual_bytes >= (size_t)src_stride * h)) {
+			if (LIKELY(ANativeWindow_lock(window, &buffer, NULL) == 0)) {
+				if (LIKELY((w <= buffer.width) && (h <= buffer.height)
+					&& is_rgba_window_format(buffer.format))) {
+
+					yuyv_to_rgba_rows((const uint8_t *)frame->data, src_stride,
+						(uint8_t *)buffer.bits, buffer.stride * 4, w, h,
+						h >= 720 ? &kYuvBt709 : &kYuvBt601);
+					result = 0;
+				}
+				ANativeWindow_unlockAndPost(window);
+			}
+		}
+	}
+	ANativeWindow_release(window);
+	if (LIKELY(!result)) {
+		const uint32_t elapsed = (uint32_t)(monotonic_us() - start);
+		const uint32_t avg = mStatDecodeUsAvg;
+		mStatDecodeUsAvg = avg ? (avg * 7 + elapsed) / 8 : elapsed;
+		mStatFramesDrawn++;
+	}
+	return result;
+}
+
+void UVCPreview::do_preview_low_latency() {
+	ENTER();
+
+	LOGI("low latency preview:%dx%d,mode=%d", frameWidth, frameHeight, frameMode);
+	// same priority as Android's display threads, so that drawing is not delayed
+	setpriority(PRIO_PROCESS, gettid(), -4);
+	for ( ; LIKELY(isRunning()) ; ) {
+		uvc_frame_t *frame = waitPreviewFrame();
+		if (LIKELY(frame)) {
+			if (LIKELY(isRunning())) {
+				draw_low_latency(frame);
+			}
+			recycle_frame(frame);
+		}
+	}
+	if (mMjpegDecoder) {
+		uvc_mjpeg_decoder_destroy(mMjpegDecoder);
+		mMjpegDecoder = NULL;
 	}
 
 	EXIT();

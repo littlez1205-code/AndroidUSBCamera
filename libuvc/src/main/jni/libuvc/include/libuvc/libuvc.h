@@ -803,6 +803,15 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_mjpeg2yuyv(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 #endif
 
+/** Reusable MJPEG decoder writing RGBA pixels into a caller supplied buffer.
+ * Declared outside of LIBUVC_HAS_JPEG because frame-mjpeg.c includes this
+ * header before localdefines.h defines that macro. */
+typedef struct uvc_mjpeg_decoder uvc_mjpeg_decoder_t;
+uvc_mjpeg_decoder_t *uvc_mjpeg_decoder_create(void);
+void uvc_mjpeg_decoder_destroy(uvc_mjpeg_decoder_t *dec);
+uvc_error_t uvc_mjpeg_decoder_start(uvc_mjpeg_decoder_t *dec, uvc_frame_t *in, int *out_width, int *out_height);
+uvc_error_t uvc_mjpeg_decoder_read(uvc_mjpeg_decoder_t *dec, uint8_t *dst, int dst_stride, int max_lines);
+
 uvc_error_t uvc_yuyv2rgb565(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_uyvy2rgb565(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_rgb2rgb565(uvc_frame_t *in, uvc_frame_t *out);		// XXX
