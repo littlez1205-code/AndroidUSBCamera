@@ -56,6 +56,15 @@ jobs:
           name: USB-Display-apk
           path: out/USB-Display.apk
 
+      # unstripped native libraries, to turn "libuvc.so pc 0x..." of a crash report into source lines
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-symbols
+          path: |
+            libuvc/build/intermediates/cxx/**/obj/local/**/*.so
+            libuvc/build/intermediates/ndkBuild/**/obj/local/**/*.so
+          if-no-files-found: warn
+
       - name: Publish to the monitor-latest release
         env:
           GH_TOKEN: ${{ github.token }}

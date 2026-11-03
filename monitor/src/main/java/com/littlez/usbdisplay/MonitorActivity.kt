@@ -24,6 +24,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.Surface
@@ -119,12 +120,14 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
 
     override fun onStart() {
         super.onStart()
+        Log.i(TAG, "onStart")
         started = true
         hideSystemBars()
         startConnection()
     }
 
     override fun onStop() {
+        Log.i(TAG, "onStop")
         started = false
         permissionPending = false
         currentDevice = null
@@ -692,6 +695,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     }
 
     companion object {
+        private const val TAG = "MonitorActivity"
         private const val ACTION_USB_PERMISSION = "com.littlez.usbdisplay.USB_PERMISSION"
         private const val REQUEST_CAMERA = 1
         private const val ATTACH_DELAY_MS = 1000L

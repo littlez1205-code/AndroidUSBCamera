@@ -263,6 +263,8 @@ struct uvc_stream_handle {
   /** set when uvc_stream_stop gave up waiting for cancelled transfers:
    * the stream must not be freed because a callback can still arrive */
   uint8_t pending_transfers;
+  /** set while the user callback thread exists and still has to be joined */
+  uint8_t cb_thread_started;
   /** Current control block */
   struct uvc_stream_ctrl cur_ctrl;
 

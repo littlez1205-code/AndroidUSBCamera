@@ -92,6 +92,7 @@ class CaptureController(context: Context, private val listener: Listener) {
         } else {
             val done = CountDownLatch(1)
             handler.post {
+                Log.i(TAG, "surface destroyed")
                 stopPreviewInternal()
                 surface = null
                 done.countDown()
@@ -140,6 +141,7 @@ class CaptureController(context: Context, private val listener: Listener) {
     private fun openInternal(device: UsbDevice, preferredModeKey: String?) {
         if (camera != null && deviceName == device.deviceName) return
         closeInternal()
+        Log.i(TAG, "open ${device.deviceName} ${device.vendorId}:${device.productId}")
         preferredKey = preferredModeKey
         setStatus(Status.CONNECTING)
         var block: USBMonitor.UsbControlBlock? = null
@@ -185,6 +187,7 @@ class CaptureController(context: Context, private val listener: Listener) {
     }
 
     private fun closeInternal() {
+        if (camera != null) Log.i(TAG, "close")
         stopPreviewInternal()
         try {
             camera?.destroy()
@@ -261,6 +264,7 @@ class CaptureController(context: Context, private val listener: Listener) {
     private fun stopPreviewInternal() {
         handler.removeCallbacks(pollRunnable)
         if (previewing) {
+            Log.i(TAG, "stop preview ${activeMode?.key}")
             try {
                 camera?.stopPreview()
             } catch (e: Throwable) {

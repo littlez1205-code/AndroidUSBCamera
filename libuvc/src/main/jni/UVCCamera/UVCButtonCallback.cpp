@@ -21,6 +21,13 @@ UVCButtonCallback::UVCButtonCallback(uvc_device_handle_t *devh)
 UVCButtonCallback::~UVCButtonCallback() {
 
 	ENTER();
+	// unregister first: libuvc calls the callback while holding devh->status_mutex, so once
+	// this returns no callback is running or can start, and destroying our mutex is safe.
+	// Without this a status interrupt arriving while the camera is closed locked a
+	// destroyed mutex on the USB event thread (abort on Android 9+).
+	if (mDeviceHandle) {
+		uvc_set_button_callback(mDeviceHandle, NULL, NULL);
+	}
 	pthread_mutex_destroy(&button_mutex);
 	EXIT();
 }

@@ -1599,7 +1599,9 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	 */
 	MARK("create callback thread");
 	if LIKELY(cb) {
-		pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh);
+		if (pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh) == 0) {
+			strmh->cb_thread_started = 1;
+		}
 	}
 	MARK("submit transfers");
 	for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; transfer_id++) {
@@ -1828,11 +1830,9 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 
 	if (!strmh) RETURN(UVC_SUCCESS, uvc_error_t);
 
-	if (UNLIKELY(!strmh->running)) {
-		UVC_EXIT(UVC_ERROR_INVALID_PARAM);
-		RETURN(UVC_ERROR_INVALID_PARAM, uvc_error_t);
-	}
-
+	// Do the clean up even when running was already cleared: a LIBUSB_TRANSFER_NO_DEVICE
+	// callback (cable pulled, card reset) clears it while transfers and the user callback
+	// thread are still alive. Freeing the stream then crashes in a late callback.
 	strmh->running = 0;
 
 	pthread_mutex_lock(&strmh->cb_mutex);
@@ -1888,9 +1888,10 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 
 	/** @todo stop the actual stream, camera side? */
 
-	if (strmh->user_cb) {
-		/* wait for the thread to stop (triggered by LIBUSB_TRANSFER_CANCELLED transfer) */
+	if (strmh->cb_thread_started) {
+		/* wait for the thread to stop (it sees running == 0 after the broadcast above) */
 		pthread_join(strmh->cb_thread, NULL);
+		strmh->cb_thread_started = 0;
 	}
 
 	RETURN(UVC_SUCCESS, uvc_error_t);
@@ -1906,10 +1907,13 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 void uvc_stream_close(uvc_stream_handle_t *strmh) {
 	UVC_ENTER();
 
-	if (!strmh) { UVC_EXIT_VOID() };
+	if (!strmh) {
+		UVC_EXIT_VOID();
+		return;
+	}
 
-	if (strmh->running)
-		uvc_stream_stop(strmh);
+	// always: also cleans up after a NO_DEVICE callback already cleared running
+	uvc_stream_stop(strmh);
 
 	if (UNLIKELY(strmh->pending_transfers)) {
 		// a callback can still arrive for this stream: keep it (leak) instead of crashing later
