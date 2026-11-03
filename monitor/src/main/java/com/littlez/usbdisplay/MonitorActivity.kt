@@ -23,6 +23,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -297,6 +298,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         this.modes = modes
         this.activeMode = active
         this.autoMode = auto
+        applyFrameRateHint()
         updateInfo()
     }
 
@@ -315,6 +317,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         controller.setSurface(holder.surface)
+        applyFrameRateHint()
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -600,6 +603,19 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
+        }
+    }
+
+    /** tell the system the frame rate of the picture so that adaptive refresh rate never goes below it */
+    private fun applyFrameRateHint() {
+        if (Build.VERSION.SDK_INT < 30) return
+        val fps = activeMode?.fps ?: return
+        val surface = surfaceView.holder.surface ?: return
+        if (!surface.isValid) return
+        try {
+            surface.setFrameRate(fps.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+        } catch (e: Exception) {
+            // not supported on this device, the default refresh rate is used
         }
     }
 

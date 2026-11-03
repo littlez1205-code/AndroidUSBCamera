@@ -859,13 +859,19 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 			&& !uvc_mjpeg_decoder_start(mMjpegDecoder, frame, &w, &h)) {
 
 			if (LIKELY(ANativeWindow_lock(window, &buffer, NULL) == 0)) {
-				if (LIKELY((w <= buffer.width) && (h <= buffer.height)
-					&& is_rgba_window_format(buffer.format))) {
-
+				const bool fits = (w <= buffer.width) && (h <= buffer.height)
+					&& is_rgba_window_format(buffer.format);
+				if (LIKELY(fits)) {
 					result = uvc_mjpeg_decoder_read(mMjpegDecoder,
 						(uint8_t *)buffer.bits, buffer.stride * 4, buffer.height);
 				}
 				ANativeWindow_unlockAndPost(window);
+				if (UNLIKELY(!fits || (w != buffer.width) || (h != buffer.height))) {
+					// some cameras send JPEGs of another size than negotiated (e.g. 1920x1088),
+					// follow the stream so that the next frames fit the window buffers
+					LOGW("jpeg size %dx%d differs from window %dx%d", w, h, buffer.width, buffer.height);
+					ANativeWindow_setBuffersGeometry(window, w, h, windowFormat());
+				}
 			}
 		}
 	} else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
