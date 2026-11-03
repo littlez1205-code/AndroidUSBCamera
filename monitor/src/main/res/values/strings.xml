@@ -31,5 +31,11 @@
 
     <string name="info_stream">%1$d×%2$d %3$s · 采集 %4$.1f 帧/秒 · 显示 %5$.1f 帧/秒 · 每帧 %6$.1f 毫秒</string>
     <string name="info_low_fps">采集卡在这个分辨率最高只给 %1$d 帧，想要 60 帧请在「分辨率」里选低一点的分辨率</string>
+    <string name="crash_title">上次闪退的原因</string>
+    <string name="crash_message">上次 App 异常退出了（闪退）。点「复制」把下面的内容复制下来发给我，方便定位问题。</string>
+    <string name="crash_copy">复制</string>
+    <string name="crash_close">关闭</string>
+    <string name="crash_copied">已复制</string>
+
     <string name="info_portrait_hint">竖屏模式：请在电脑的显示设置里把这块屏幕的方向设成「纵向」</string>
 </resources>

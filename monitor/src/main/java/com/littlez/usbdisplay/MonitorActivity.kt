@@ -5,6 +5,8 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -12,6 +14,7 @@ import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
@@ -34,8 +37,11 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import com.jiangdg.uvc.UVCCamera
+import java.util.Locale
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -67,6 +73,9 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     private var retryOnTap = false
     private var openSettingsOnTap = false
     private var shownMenuForStream = false
+    /** true while the crash report is shown: do not touch the capture card until it is closed */
+    private var holdConnection = false
+    private var deviceLabel = "-"
 
     private var frameWidth = 1920
     private var frameHeight = 1080
@@ -105,6 +114,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         applyOrientation()
         registerUsbReceiver()
         updateMenuLabels()
+        CrashLog.takeReport(this)?.let { showCrashReport(it) }
     }
 
     override fun onStart() {
@@ -165,7 +175,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     // ---------------------------------------------------------------- USB
 
     private fun startConnection() {
-        if (!started) return
+        if (!started || holdConnection) return
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
             return
@@ -183,6 +193,8 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         if (usbManager.hasPermission(device)) {
             currentDevice = device
             retryOnTap = false
+            deviceLabel = describeDevice(device)
+            saveCrashState()
             controller.open(device, prefs.getString(KEY_MODE, null))
         } else if (!permissionPending) {
             permissionPending = true
@@ -298,6 +310,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         this.modes = modes
         this.activeMode = active
         this.autoMode = auto
+        saveCrashState()
         applyFrameRateHint()
         updateInfo()
     }
@@ -522,6 +535,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     private fun toggleStretch() {
         stretch = !stretch
         prefs.edit().putBoolean(KEY_STRETCH, stretch).apply()
+        saveCrashState()
         updateSurfaceLayout()
         updateMenuLabels()
     }
@@ -533,6 +547,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
             else -> ROTATION_NONE
         }
         prefs.edit().putInt(KEY_ROTATION, rotation).apply()
+        saveCrashState()
         controller.setTransform(transformFor(rotation))
         applyOrientation()
         updateSurfaceLayout()
@@ -628,6 +643,53 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).roundToInt()
+
+    private fun describeDevice(device: UsbDevice): String {
+        val name = try {
+            device.productName
+        } catch (e: Exception) {
+            null
+        }
+        return String.format(Locale.US, "%s (%04x:%04x)", name ?: "?", device.vendorId, device.productId)
+    }
+
+    /** remembered for the crash report: which card and settings were in use */
+    private fun saveCrashState() {
+        val mode = activeMode?.key ?: "-"
+        val view = if (stretch) "stretch" else "fit"
+        CrashLog.setState(this, "采集卡 $deviceLabel，模式 $mode${if (autoMode) "(自动)" else ""}，方向 $rotation，$view")
+    }
+
+    private fun showCrashReport(report: String) {
+        holdConnection = true
+        val text = TextView(this).apply {
+            this.text = report
+            setTextIsSelectable(true)
+            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        val scroll = ScrollView(this).apply { addView(text) }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(R.string.crash_title)
+            .setMessage(R.string.crash_message)
+            .setView(scroll)
+            .setPositiveButton(R.string.crash_copy) { _, _ ->
+                try {
+                    val clipboard = getSystemService(ClipboardManager::class.java)
+                    clipboard.setPrimaryClip(ClipData.newPlainText("crash", report))
+                    Toast.makeText(this, R.string.crash_copied, Toast.LENGTH_SHORT).show()
+                } catch (ignored: Exception) {
+                }
+            }
+            .setNegativeButton(R.string.crash_close, null)
+            .setOnDismissListener {
+                holdConnection = false
+                hideSystemBars()
+                startConnection()
+            }
+            .show()
+    }
 
     companion object {
         private const val ACTION_USB_PERMISSION = "com.littlez.usbdisplay.USB_PERMISSION"
