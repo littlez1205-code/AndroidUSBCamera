@@ -248,6 +248,8 @@ typedef struct uvc_device_info {
   and then allow the user to change the number of buffers as required.
  */
 #define LIBUVC_NUM_TRANSFER_BUFS 10
+/** how long uvc_stream_stop waits for cancelled transfers, longer than the 5 sec transfer timeout */
+#define UVC_STOP_TIMEOUT_SEC 6
 
 #define LIBUVC_XFER_BUF_SIZE	( 16 * 1024 * 1024 )
 
@@ -258,6 +260,9 @@ struct uvc_stream_handle {
 
   /** if true, stream is running (streaming video to host) */
   uint8_t running;
+  /** set when uvc_stream_stop gave up waiting for cancelled transfers:
+   * the stream must not be freed because a callback can still arrive */
+  uint8_t pending_transfers;
   /** Current control block */
   struct uvc_stream_ctrl cur_ctrl;
 

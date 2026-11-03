@@ -977,7 +977,10 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 #endif
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
-		if (!transfer->num_iso_packets) {
+		if (UNLIKELY(!strmh->running)) {
+			// stopping: the frame buffers may already be going away, just release the transfer
+			resubmit = 0;
+		} else if (!transfer->num_iso_packets) {
 			/* This is a bulk mode transfer, so it just has one payload transfer */
 			_uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
 		} else {
@@ -990,7 +993,12 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 		// pass through to following lines
 	case LIBUSB_TRANSFER_CANCELLED:
 	case LIBUSB_TRANSFER_ERROR:
-		libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
+		// clear_halt is a synchronous control request that can take seconds when the
+		// device does not answer. Never do it while stopping: uvc_stream_stop waits for
+		// every cancelled transfer to come back here before the stream is freed.
+		if (strmh->running && (transfer->status == LIBUSB_TRANSFER_ERROR)) {
+			libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
+		}
 		UVC_DEBUG("not retrying transfer, status = %d", transfer->status);
 //		MARK("not retrying transfer, status = %d", transfer->status);
 //		_uvc_delete_transfer(transfer);
@@ -1005,7 +1013,10 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	}
 
 	if (LIKELY(strmh->running && resubmit)) {
-		libusb_submit_transfer(transfer);
+		if (UNLIKELY(libusb_submit_transfer(transfer) != LIBUSB_SUCCESS)) {
+			// nobody would release this transfer otherwise and uvc_stream_stop would wait for it
+			_uvc_delete_transfer(transfer);
+		}
 	} else {
 		// XXX delete non-reusing transfer
 		// real implementation of deleting transfer moves to _uvc_delete_transfer
@@ -1600,7 +1611,17 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	}
 
 	if (UNLIKELY(ret != UVC_SUCCESS)) {
-		/** @todo clean up transfers and memory */
+		/* transfers that were never submitted never get a callback: release them here,
+		 * the submitted ones are released by their callback once running is cleared */
+		pthread_mutex_lock(&strmh->cb_mutex);
+		for (; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; transfer_id++) {
+			if (strmh->transfers[transfer_id]) {
+				free(strmh->transfers[transfer_id]->buffer);
+				libusb_free_transfer(strmh->transfers[transfer_id]);
+				strmh->transfers[transfer_id] = NULL;
+			}
+		}
+		pthread_mutex_unlock(&strmh->cb_mutex);
 		goto fail;
 	}
 
@@ -1829,15 +1850,17 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 					libusb_free_transfer(strmh->transfers[i]);
 					strmh->transfers[i] = NULL; */
 				}
-				if (res == LIBUSB_ERROR_NOT_FOUND && strmh->transfers[i] != NULL) {
-                    free(strmh->transfers[i]->buffer);
-                    // libusb_free_transfer(strmh->transfers[i]);
-                    strmh->transfers[i] = NULL;
-                }
+				// LIBUSB_ERROR_NOT_FOUND: the transfer is not in flight because its callback is
+				// running right now. Do not free it here (the callback may still use it), the
+				// callback sees running == 0 and releases it through _uvc_delete_transfer.
 			}
 		}
 
-		/* Wait for transfers to complete/cancel */
+		/* Wait until every transfer came back. Freeing the stream earlier lets a late
+		 * callback lock the destroyed cb_mutex, which aborts the app on Android 9+. */
+		struct timespec deadline;
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_sec += UVC_STOP_TIMEOUT_SEC;
 		for (; 1 ;) {
 			for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
 				if (strmh->transfers[i] != NULL)
@@ -1845,21 +1868,17 @@ uvc_error_t uvc_stream_stop(uvc_stream_handle_t *strmh) {
 			}
 			if (i == LIBUVC_NUM_TRANSFER_BUFS)
 				break;
-
-             ts.tv_sec = 0;
-             ts.tv_nsec = 0;
-
-#if _POSIX_TIMERS > 0
-             clock_gettime(CLOCK_REALTIME, &ts);
-#else
-             gettimeofday(&tv, NULL);
-             ts.tv_sec = tv.tv_sec;
-             ts.tv_nsec = tv.tv_usec * 1000;
-#endif
-             ts.tv_sec += 1;
-             ts.tv_nsec += 0;
-			if (pthread_cond_timedwait(&strmh->cb_cond, &strmh->cb_mutex, &ts) == ETIMEDOUT) {
-                break;
+			if (pthread_cond_timedwait(&strmh->cb_cond, &strmh->cb_mutex, &deadline) == ETIMEDOUT) {
+				// re-check once more, then give up waiting
+				for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+					if (strmh->transfers[i] != NULL)
+						break;
+				}
+				if (i < LIBUVC_NUM_TRANSFER_BUFS) {
+					LOGW("uvc_stream_stop: transfers still pending after %d sec", UVC_STOP_TIMEOUT_SEC);
+					strmh->pending_transfers = 1;
+				}
+				break;
 			}
 		}
 		// Kick the user thread awake
@@ -1891,6 +1910,14 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 
 	if (strmh->running)
 		uvc_stream_stop(strmh);
+
+	if (UNLIKELY(strmh->pending_transfers)) {
+		// a callback can still arrive for this stream: keep it (leak) instead of crashing later
+		LOGW("uvc_stream_close: keeping stream with pending transfers");
+		DL_DELETE(strmh->devh->streams, strmh);
+		UVC_EXIT_VOID();
+		return;
+	}
 
 	uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
 
