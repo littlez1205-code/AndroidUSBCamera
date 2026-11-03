@@ -31,6 +31,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # the default also installs the obsolete "tools" package, which no longer exists
+          packages: 'platform-tools'
 
       - name: Install NDK, CMake and platform
         run: sdkmanager --install "ndk;28.1.13356709" "cmake;3.22.1" "platforms;android-36" "build-tools;35.0.0" > /dev/null

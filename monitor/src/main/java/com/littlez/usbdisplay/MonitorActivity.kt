@@ -583,7 +583,11 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
 
     private fun hideSystemBars() {
         if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false)
+            if (Build.VERSION.SDK_INT < 35) {
+                // Android 15+ always draws edge to edge
+                @Suppress("DEPRECATION")
+                window.setDecorFitsSystemWindows(false)
+            }
             window.insetsController?.let {
                 it.hide(WindowInsets.Type.systemBars())
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE

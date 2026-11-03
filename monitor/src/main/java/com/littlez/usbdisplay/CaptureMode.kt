@@ -89,12 +89,12 @@ data class CaptureMode(
             return result.sortedWith(menuOrder)
         }
 
-        /** order shown in the menu: 60 fps modes first, then bigger first */
+        /** order shown in the menu: 60 fps modes first, then bigger, then faster */
         private val menuOrder = compareBy<CaptureMode>(
             { if (it.isSixtyFps) 0 else 1 },
             { -it.area },
-            { if (it.format == Format.YUYV) 0 else 1 },
             { -it.fps },
+            { if (it.format == Format.YUYV) 0 else 1 },
         )
 
         /**
