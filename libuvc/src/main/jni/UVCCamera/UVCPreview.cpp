@@ -88,6 +88,8 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	mStatFramesDropped(0),
 	mStatDecodeUsAvg(0),
 	mStatFramesRejected(0),
+	mStatWorkUsAvg(0),
+	mStatWaitUsAvg(0),
 	mStreamState(0),
 	mFrameInterval(0) {
 
@@ -323,13 +325,15 @@ int UVCPreview::getPreviewStats(int32_t *stats, int count) {
 		mStreamState,						// 8: 0: idle, 1: streaming, <0: error
 		mLowLatency ? 1 : 0,				// 9: low latency mode
 		(int32_t)mStatFramesRejected,		// 10: frames with an unexpected size/format
+		(int32_t)mStatWorkUsAvg,			// 11: decode / convert time per frame [us]
+		(int32_t)mStatWaitUsAvg,			// 12: time waiting for the compositor per frame [us]
 	};
 	const int n = (int)(sizeof(values) / sizeof(values[0]));
 	int m = count < n ? count : n;
 	for (int i = 0; i < m; i++) {
 		stats[i] = values[i];
 	}
-	// 11...: libuvc streaming diagnostics (struct uvc_stream_diag)
+	// 13...: libuvc streaming diagnostics (struct uvc_stream_diag)
 	if ((count > m) && mDeviceHandle) {
 		m += uvc_get_stream_diag(mDeviceHandle, stats + m, count - m);
 	}
@@ -854,6 +858,8 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 	}
 
 	const int64_t start = monotonic_us();
+	int64_t wait_us = 0;	// time spent waiting for the compositor (free buffer / queueing)
+	int64_t t;
 	int result = -1;
 	ANativeWindow_Buffer buffer;
 	if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
@@ -865,14 +871,19 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 		if (LIKELY(mMjpegDecoder)
 			&& !uvc_mjpeg_decoder_start(mMjpegDecoder, frame, &w, &h)) {
 
-			if (LIKELY(ANativeWindow_lock(window, &buffer, NULL) == 0)) {
+			t = monotonic_us();
+			const int32_t locked = ANativeWindow_lock(window, &buffer, NULL);
+			wait_us += monotonic_us() - t;
+			if (LIKELY(locked == 0)) {
 				const bool fits = (w <= buffer.width) && (h <= buffer.height)
 					&& is_rgba_window_format(buffer.format);
 				if (LIKELY(fits)) {
 					result = uvc_mjpeg_decoder_read(mMjpegDecoder,
 						(uint8_t *)buffer.bits, buffer.stride * 4, buffer.height);
 				}
+				t = monotonic_us();
 				ANativeWindow_unlockAndPost(window);
+				wait_us += monotonic_us() - t;
 				if (UNLIKELY(!fits || (w != buffer.width) || (h != buffer.height))) {
 					// some cameras send JPEGs of another size than negotiated (e.g. 1920x1088),
 					// follow the stream so that the next frames fit the window buffers
@@ -886,7 +897,10 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 		const int h = frame->height;
 		const int src_stride = frame->step ? (int)frame->step : w * 2;
 		if (LIKELY(frame->actual_bytes >= (size_t)src_stride * h)) {
-			if (LIKELY(ANativeWindow_lock(window, &buffer, NULL) == 0)) {
+			t = monotonic_us();
+			const int32_t locked = ANativeWindow_lock(window, &buffer, NULL);
+			wait_us += monotonic_us() - t;
+			if (LIKELY(locked == 0)) {
 				if (LIKELY((w <= buffer.width) && (h <= buffer.height)
 					&& is_rgba_window_format(buffer.format))) {
 
@@ -895,15 +909,25 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 						h >= 720 ? &kYuvBt709 : &kYuvBt601);
 					result = 0;
 				}
+				t = monotonic_us();
 				ANativeWindow_unlockAndPost(window);
+				wait_us += monotonic_us() - t;
 			}
 		}
 	}
 	ANativeWindow_release(window);
 	if (LIKELY(!result)) {
-		const uint32_t elapsed = (uint32_t)(monotonic_us() - start);
+		const int64_t total = monotonic_us() - start;
+		const uint32_t elapsed = (uint32_t)total;
+		const uint32_t waited = (uint32_t)(wait_us < total ? wait_us : total);
+		const uint32_t worked = elapsed - waited;
+		// moving averages over about 8 frames
 		const uint32_t avg = mStatDecodeUsAvg;
 		mStatDecodeUsAvg = avg ? (avg * 7 + elapsed) / 8 : elapsed;
+		const uint32_t avg_work = mStatWorkUsAvg;
+		mStatWorkUsAvg = avg_work ? (avg_work * 7 + worked) / 8 : worked;
+		const uint32_t avg_wait = mStatWaitUsAvg;
+		mStatWaitUsAvg = avg_wait ? (avg_wait * 7 + waited) / 8 : waited;
 		mStatFramesDrawn++;
 	}
 	return result;

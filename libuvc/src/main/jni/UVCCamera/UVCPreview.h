@@ -123,6 +123,8 @@ private:
 	volatile uint32_t mStatFramesDropped;
 	volatile uint32_t mStatDecodeUsAvg;
 	volatile uint32_t mStatFramesRejected;
+	volatile uint32_t mStatWorkUsAvg;
+	volatile uint32_t mStatWaitUsAvg;
 	volatile int32_t mStreamState;
 	volatile uint32_t mFrameInterval;
 	int windowFormat() const;

@@ -48,7 +48,7 @@ import kotlin.math.roundToInt
 
 /**
  * Full screen "monitor": shows the picture of an HDMI capture card.
- * Tap the screen for a small menu (resolution, fit / stretch, orientation).
+ * Tap the screen for a small menu (resolution, fit / stretch / 1:1 pixels, orientation).
  */
 class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Callback {
 
@@ -81,7 +81,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
 
     private var frameWidth = 1920
     private var frameHeight = 1080
-    private var stretch = false
+    private var scaleMode = SCALE_FIT
     private var rotation = ROTATION_NONE
     private var modes: List<CaptureMode> = emptyList()
     private var activeMode: CaptureMode? = null
@@ -94,7 +94,8 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        stretch = prefs.getBoolean(KEY_STRETCH, false)
+        scaleMode = prefs.getInt(KEY_SCALE_MODE,
+            if (prefs.getBoolean(KEY_STRETCH, false)) SCALE_STRETCH else SCALE_FIT)	// older versions stored a flag
         rotation = prefs.getInt(KEY_ROTATION, ROTATION_NONE)
         autoMode = prefs.getString(KEY_MODE, null) == null
 
@@ -402,7 +403,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
             setPadding(0, 0, 0, dp(8))
         }
         modeButton = menuButton { showModeDialog() }
-        scaleButton = menuButton { toggleStretch() }
+        scaleButton = menuButton { cycleScaleMode() }
         rotateButton = menuButton { cycleRotation() }
         diagButton = menuButton { showDiagnostics() }
         buttonRow = LinearLayout(this).apply {
@@ -497,7 +498,11 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     private fun updateMenuLabels() {
         modeButton.setText(R.string.menu_mode)
         diagButton.setText(R.string.menu_diag)
-        scaleButton.setText(if (stretch) R.string.menu_stretch else R.string.menu_fit)
+        scaleButton.setText(when (scaleMode) {
+            SCALE_STRETCH -> R.string.menu_stretch
+            SCALE_PIXEL -> R.string.menu_pixel
+            else -> R.string.menu_fit
+        })
         rotateButton.setText(when (rotation) {
             ROTATION_CW -> R.string.menu_portrait_cw
             ROTATION_CCW -> R.string.menu_portrait_ccw
@@ -510,13 +515,15 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         val stats = lastStats
         if (stats != null && captureStatus == CaptureController.Status.STREAMING) {
             lines.add(getString(R.string.info_stream, stats.mode.width, stats.mode.height,
-                formatLabel(stats.mode.format), stats.captureFps, stats.displayFps, stats.drawMs))
+                formatLabel(stats.mode.format), stats.captureFps, stats.displayFps))
+            lines.add(getString(R.string.info_frame_time, stats.decodeMs, stats.waitMs))
             val negotiated = stats.negotiatedFps.roundToInt()
             if (negotiated in 1 until CaptureMode.MIN_SMOOTH_FPS) {
                 lines.add(getString(R.string.info_low_fps, negotiated))
             }
         }
         if (rotation != ROTATION_NONE) lines.add(getString(R.string.info_portrait_hint))
+        if (scaleMode == SCALE_PIXEL) lines.add(getString(R.string.info_pixel_hint))
         infoText.text = lines.joinToString("\n")
         infoText.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
     }
@@ -556,12 +563,18 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     private fun formatLabel(f: CaptureMode.Format) =
         getString(if (f == CaptureMode.Format.YUYV) R.string.format_yuyv else R.string.format_mjpeg)
 
-    private fun toggleStretch() {
-        stretch = !stretch
-        prefs.edit().putBoolean(KEY_STRETCH, stretch).apply()
+    /** keep aspect ratio -> stretch -> 1:1 pixels */
+    private fun cycleScaleMode() {
+        scaleMode = when (scaleMode) {
+            SCALE_FIT -> SCALE_STRETCH
+            SCALE_STRETCH -> SCALE_PIXEL
+            else -> SCALE_FIT
+        }
+        prefs.edit().putInt(KEY_SCALE_MODE, scaleMode).apply()
         saveCrashState()
         updateSurfaceLayout()
         updateMenuLabels()
+        updateInfo()
     }
 
     private fun cycleRotation() {
@@ -593,7 +606,11 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         }
     }
 
-    /** size the SurfaceView: keep the aspect ratio (letterbox) or fill the screen */
+    /**
+     * size the SurfaceView: keep the aspect ratio (letterbox), fill the screen, or show the
+     * frame 1:1 in screen pixels (no interpolation, sharpest text; scaled down only when the
+     * frame is bigger than the screen)
+     */
     private fun updateSurfaceLayout() {
         val cw = root.width
         val ch = root.height
@@ -603,11 +620,12 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         val srcH = if (rotated) frameWidth else frameHeight
         val w: Int
         val h: Int
-        if (stretch) {
+        if (scaleMode == SCALE_STRETCH) {
             w = cw
             h = ch
         } else {
-            val scale = min(cw.toFloat() / srcW, ch.toFloat() / srcH)
+            val fit = min(cw.toFloat() / srcW, ch.toFloat() / srcH)
+            val scale = if (scaleMode == SCALE_PIXEL) min(1f, fit) else fit
             w = (srcW * scale).roundToInt()
             h = (srcH * scale).roundToInt()
         }
@@ -685,7 +703,11 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     /** remembered for the crash report: which card and settings were in use */
     private fun saveCrashState() {
         val mode = activeMode?.key ?: "-"
-        val view = if (stretch) "stretch" else "fit"
+        val view = when (scaleMode) {
+            SCALE_STRETCH -> "stretch"
+            SCALE_PIXEL -> "pixel"
+            else -> "fit"
+        }
         CrashLog.setState(this, "采集卡 $deviceLabel，模式 $mode${if (autoMode) "(自动)" else ""}，方向 $rotation，$view")
     }
 
@@ -742,6 +764,11 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         private const val PREFS = "display"
         private const val KEY_MODE = "mode"
         private const val KEY_STRETCH = "stretch"
+        private const val KEY_SCALE_MODE = "scale_mode"
+
+        private const val SCALE_FIT = 0
+        private const val SCALE_STRETCH = 1
+        private const val SCALE_PIXEL = 2
         private const val KEY_ROTATION = "rotation"
 
         private const val ROTATION_NONE = 0

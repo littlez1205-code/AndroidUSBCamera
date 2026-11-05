@@ -32,6 +32,10 @@ class CaptureController(context: Context, private val listener: Listener) {
         val displayFps: Float,
         /** average time to decode and draw one frame */
         val drawMs: Float,
+        /** part of drawMs spent decoding / converting */
+        val decodeMs: Float,
+        /** part of drawMs spent waiting for the screen (free buffer, handing the frame over) */
+        val waitMs: Float,
     )
 
     interface Listener {
@@ -395,6 +399,8 @@ class CaptureController(context: Context, private val listener: Listener) {
                 captureFps = captureFps,
                 displayFps = displayFps,
                 drawMs = stats[UVCCamera.STAT_DRAW_TIME_US] / 1000f,
+                decodeMs = stats[UVCCamera.STAT_DECODE_TIME_US] / 1000f,
+                waitMs = stats[UVCCamera.STAT_WAIT_TIME_US] / 1000f,
             )
             lastStatsTime = now
             lastStatsReceived = received
@@ -442,7 +448,8 @@ class CaptureController(context: Context, private val listener: Listener) {
             "（最后 ${s[UVCCamera.STAT_UVC_LAST_PACKET_STATUS]}），头部错误 ${s[UVCCamera.STAT_UVC_HEADER_ERRORS]}" +
             "，拼帧 ${s[UVCCamera.STAT_UVC_FRAMES]} 出错 ${s[UVCCamera.STAT_UVC_FRAMES_ERR]}" +
             "，数据 ${s[UVCCamera.STAT_UVC_KBYTES]} KB，尺寸不符 ${s[UVCCamera.STAT_FRAMES_REJECTED]}" +
-            "，收到 ${s[UVCCamera.STAT_FRAMES_RECEIVED]} 显示 ${s[UVCCamera.STAT_FRAMES_DRAWN]}"
+            "，收到 ${s[UVCCamera.STAT_FRAMES_RECEIVED]} 显示 ${s[UVCCamera.STAT_FRAMES_DRAWN]}" +
+            "，每帧 解码 ${s[UVCCamera.STAT_DECODE_TIME_US] / 1000f} 等屏幕 ${s[UVCCamera.STAT_WAIT_TIME_US] / 1000f} 毫秒"
 
     private fun postModes() {
         val list = modes

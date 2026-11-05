@@ -18,6 +18,7 @@
     <string name="menu_mode">分辨率</string>
     <string name="menu_fit">画面：保持比例</string>
     <string name="menu_stretch">画面：拉伸铺满</string>
+    <string name="menu_pixel">画面：原始像素</string>
     <string name="menu_landscape">方向：横屏</string>
     <string name="menu_portrait_cw">方向：竖屏（向右转）</string>
     <string name="menu_portrait_ccw">方向：竖屏（向左转）</string>
@@ -29,7 +30,9 @@
     <string name="format_yuyv">无压缩</string>
     <string name="format_mjpeg">MJPEG</string>
 
-    <string name="info_stream">%1$d×%2$d %3$s · 采集 %4$.1f 帧/秒 · 显示 %5$.1f 帧/秒 · 每帧 %6$.1f 毫秒</string>
+    <string name="info_stream">%1$d×%2$d %3$s · 采集 %4$.1f 帧/秒 · 显示 %5$.1f 帧/秒</string>
+    <string name="info_frame_time">每帧：解码 %1$.1f 毫秒 · 等屏幕 %2$.1f 毫秒</string>
+    <string name="info_pixel_hint">原始像素：按 1:1 显示、不放大，文字最清楚；画面比屏幕大时才会缩小</string>
     <string name="info_low_fps">采集卡在这个分辨率最高只给 %1$d 帧，想要 60 帧请在「分辨率」里选低一点的分辨率</string>
     <string name="menu_diag">诊断信息</string>
     <string name="diag_title">诊断信息</string>
