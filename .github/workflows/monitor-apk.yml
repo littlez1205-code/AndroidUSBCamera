@@ -1,6 +1,7 @@
 # Builds the "USB 显示器" app (monitor module) and publishes the APK.
-# Download: the "monitor-latest" release of this repository, or the
-# "USB-Display-apk" artifact of a workflow run.
+# Branch pushes update the "monitor-latest" release (overwritten every time).
+# A tag "usb-display-vX.Y" creates a permanent release "USB 显示器 vX.Y" with the
+# APK and the unstripped native libraries (native-symbols.zip) of that version.
 name: USB 显示器 APK
 
 on:
@@ -51,21 +52,30 @@ jobs:
           cp monitor/build/outputs/apk/release/monitor-release.apk out/USB-Display.apk
           ls -l out
 
+      # unstripped native libraries, to turn "libuvc.so pc 0x..." of a crash report into source lines
+      - name: Collect native symbols
+        run: |
+          mkdir -p out/symbols
+          find libuvc/build/intermediates -path '*/obj/local/*' -name '*.so' | while read -r f; do
+            abi=$(basename "$(dirname "$f")")
+            mkdir -p "out/symbols/$abi"
+            cp "$f" "out/symbols/$abi/"
+          done
+          (cd out && zip -qr native-symbols.zip symbols)
+          ls -l out out/symbols/*
+
       - uses: actions/upload-artifact@v4
         with:
           name: USB-Display-apk
           path: out/USB-Display.apk
 
-      # unstripped native libraries, to turn "libuvc.so pc 0x..." of a crash report into source lines
       - uses: actions/upload-artifact@v4
         with:
           name: native-symbols
-          path: |
-            libuvc/build/intermediates/cxx/**/obj/local/**/*.so
-            libuvc/build/intermediates/ndkBuild/**/obj/local/**/*.so
-          if-no-files-found: warn
+          path: out/native-symbols.zip
 
       - name: Publish to the monitor-latest release
+        if: github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -78,3 +88,16 @@ jobs:
             gh release edit monitor-latest --notes "$NOTES"
           fi
           gh release upload monitor-latest out/USB-Display.apk --clobber
+
+      - name: Publish the version release
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'usb-display-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#usb-display-v}"
+          cp out/USB-Display.apk "out/USB-Display-v${VERSION}.apk"
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "USB 显示器 v${VERSION}" --notes-file monitor/CHANGELOG.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" "out/USB-Display-v${VERSION}.apk" out/native-symbols.zip --clobber

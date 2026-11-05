@@ -5,6 +5,9 @@ plugins {
 
 // CI passes the run number so that every build installs over the previous one
 def ciBuildNumber = System.getenv("GITHUB_RUN_NUMBER")
+// a tag "usb-display-v1.0" builds the release version "1.0"
+def ciTag = System.getenv("GITHUB_REF_TYPE") == "tag" ? System.getenv("GITHUB_REF_NAME") : null
+def releaseVersion = (ciTag != null && ciTag.startsWith("usb-display-v")) ? ciTag.substring("usb-display-v".length()) : null
 
 android {
     namespace = "com.littlez.usbdisplay"
@@ -16,7 +19,7 @@ android {
         minSdkVersion 26
         targetSdkVersion rootProject.ext.versionTarget
         versionCode ciBuildNumber ? ciBuildNumber.toInteger() : 1
-        versionName ciBuildNumber ? "1.0.${ciBuildNumber}" : "1.0.dev"
+        versionName releaseVersion ?: (ciBuildNumber ? "1.0.${ciBuildNumber}" : "1.0.dev")
 
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
