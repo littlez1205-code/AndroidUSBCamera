@@ -342,7 +342,10 @@ class CaptureController(context: Context, private val listener: Listener) {
         } else if (lastFrameTime == 0L) {
             // nothing arrived since this mode was started
             val timeout = if (failedCycles == 0) PROBE_TIMEOUT_MS else PROBE_TIMEOUT_SLOW_MS
-            if (streamState < 0 || now - startTime >= timeout) {
+            // a mode the card refused right away: try the next one at once in the first round,
+            // later rounds wait a little so that the card is not restarted twice a second
+            val refusedTimeout = if (failedCycles == 0) 0L else REFUSED_RETRY_MS
+            if ((streamState < 0 && now - startTime >= refusedTimeout) || now - startTime >= timeout) {
                 val auto = preferredKey == null
                 if (auto && !deviceDeliveredFrames && candidates.size > 1) {
                     // the card may list a mode it can not deliver on this USB port, try the next one
@@ -396,8 +399,13 @@ class CaptureController(context: Context, private val listener: Listener) {
 
     private fun transferLine(s: IntArray): String {
         val iso = s[UVCCamera.STAT_UVC_ISOCHRONOUS] == 1
-        return (if (iso) "等时 alt ${s[UVCCamera.STAT_UVC_ALTSETTING]}" else "批量") +
-            "，每包 ${s[UVCCamera.STAT_UVC_BYTES_PER_PACKET]} 字节 × ${s[UVCCamera.STAT_UVC_PACKETS_PER_TRANSFER]}" +
+        val sizes = if (iso) {
+            "等时 alt ${s[UVCCamera.STAT_UVC_ALTSETTING]}，每包 ${s[UVCCamera.STAT_UVC_BYTES_PER_PACKET]} 字节" +
+                " × ${s[UVCCamera.STAT_UVC_PACKETS_PER_TRANSFER]}"
+        } else {
+            "批量，每次传输 ${s[UVCCamera.STAT_UVC_BYTES_PER_PACKET]} 字节（USB 包 ${s[UVCCamera.STAT_UVC_PACKETS_PER_TRANSFER]}）"
+        }
+        return sizes +
             "，协商负载 ${s[UVCCamera.STAT_UVC_PAYLOAD_SIZE]}，最大帧 ${s[UVCCamera.STAT_UVC_FRAME_SIZE]}" +
             "，USB3 ${if (s[UVCCamera.STAT_UVC_SUPERSPEED] == 1) "是" else "否"}" +
             "，协商帧率 ${s[UVCCamera.STAT_FPS_X100] / 100f}"
@@ -434,5 +442,6 @@ class CaptureController(context: Context, private val listener: Listener) {
         private const val PROBE_TIMEOUT_SLOW_MS = 10000L
         private const val NO_SIGNAL_MS = 2000L
         private const val MAX_ATTEMPTS = 8
+        private const val REFUSED_RETRY_MS = 5000L
     }
 }

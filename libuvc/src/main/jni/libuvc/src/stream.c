@@ -674,7 +674,8 @@ static void _uvc_delete_transfer(struct libusb_transfer *transfer) {
  * transfer (bulk mode)
  * @param payload_len Length of the payload transfer
  */
-static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payload, size_t const payload_len) {
+static uint8_t _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payload, size_t const payload_len,
+		const int swap_on_eof) {
 	size_t header_len;
 	uint8_t header_info;
 	size_t data_len;
@@ -690,7 +691,7 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 
 	// ignore empty payload transfers
 	if (UNLIKELY(!payload || !payload_len || !strmh->outbuf))
-		return;
+		return 0;
 
 	strmh->devh->diag.packets++;
 	strmh->devh->diag.byte_remainder += payload_len;
@@ -717,7 +718,7 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 		if (UNLIKELY(header_len > payload_len)) {
 			strmh->bfh_err |= UVC_STREAM_ERR;
 			UVC_DEBUG("bogus packet: actual_len=%zd, header_len=%zd\n", payload_len, header_len);
-			return;
+			return 0;
 		}
 
 		if (UNLIKELY(strmh->devh->is_isight))
@@ -784,10 +785,57 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 			strmh->bfh_err |= UVC_STREAM_ERR;
 		}
 
-		if (header_info & UVC_STREAM_EOF/*(1 << 1)*/) {
+		if (swap_on_eof && (header_info & UVC_STREAM_EOF)/*(1 << 1)*/) {
 			// The EOF bit is set, so publish the complete frame
 			_uvc_swap_buffers(strmh);
 		}
+	}
+	return header_info;
+}
+
+/** @internal
+ * @brief append image data of a bulk payload that did not fit into its first transfer
+ */
+static void _uvc_append_payload_data(uvc_stream_handle_t *strmh, const uint8_t *data, size_t const len) {
+	if (UNLIKELY(!data || !len || !strmh->outbuf))
+		return;
+	strmh->devh->diag.packets++;
+	strmh->devh->diag.byte_remainder += len;
+	strmh->devh->diag.kbytes += strmh->devh->diag.byte_remainder >> 10;
+	strmh->devh->diag.byte_remainder &= 1023;
+	if (LIKELY(strmh->got_bytes + len < strmh->size_buf)) {
+		memcpy(strmh->outbuf + strmh->got_bytes, data, len);
+		strmh->got_bytes += len;
+	} else {
+		strmh->bfh_err |= UVC_STREAM_ERR;
+	}
+}
+
+/** @internal
+ * @brief one completed bulk transfer
+ *
+ * A payload (header + data) may need several transfers: it is complete with a short
+ * transfer or when dwMaxPayloadTransferSize bytes arrived (same as uvc_video_decode_bulk
+ * of the Linux uvcvideo driver). Only the first transfer of a payload starts with a header.
+ */
+static void _uvc_process_bulk_transfer(uvc_stream_handle_t *strmh, const uint8_t *data,
+		size_t const len, size_t const transfer_len) {
+
+	if (!strmh->bulk_payload_bytes) {
+		if (!len) return;	// zero length packet between payloads
+		strmh->bulk_header_info = _uvc_process_payload(strmh, data, len, 0);
+	} else {
+		_uvc_append_payload_data(strmh, data, len);
+	}
+	strmh->bulk_payload_bytes += len;
+	if ((len < transfer_len)
+		|| (strmh->bulk_max_payload && (strmh->bulk_payload_bytes >= strmh->bulk_max_payload))) {
+		// end of the payload
+		if (strmh->bulk_header_info & UVC_STREAM_EOF) {
+			_uvc_swap_buffers(strmh);
+		}
+		strmh->bulk_payload_bytes = 0;
+		strmh->bulk_header_info = 0;
 	}
 }
 
@@ -809,7 +857,7 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 		}
 		// libusb_get_iso_packet_buffer_simple will return NULL
 		uint8_t *pktbuf = libusb_get_iso_packet_buffer_simple(transfer, packet_id);
-		_uvc_process_payload(strmh, pktbuf, pkt->actual_length);
+		_uvc_process_payload(strmh, pktbuf, pkt->actual_length, 1);
 	}
 }
 #else
@@ -998,8 +1046,8 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 			// stopping: the frame buffers may already be going away, just release the transfer
 			resubmit = 0;
 		} else if (!transfer->num_iso_packets) {
-			/* This is a bulk mode transfer, so it just has one payload transfer */
-			_uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
+			/* This is a bulk mode transfer: a part of a payload or a whole payload */
+			_uvc_process_bulk_transfer(strmh, transfer->buffer, transfer->actual_length, transfer->length);
 		} else {
 			/* This is an isochronous mode transfer, so each packet has a payload transfer */
 			_uvc_process_payload_iso(strmh, transfer);
@@ -1632,17 +1680,44 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		/* A bulk transfer has to be a multiple of the endpoint's packet size, otherwise every
 		 * full payload overflows it. A payload that is not a multiple ends with a short
 		 * packet anyway, so rounding up never merges two payloads into one transfer. */
-		size_t bulk_size = strmh->cur_ctrl.dwMaxPayloadTransferSize;
-		const int max_packet = libusb_get_max_packet_size(
-			libusb_get_device(strmh->devh->usb_devh), format_desc->parent->bEndpointAddress);
-		if (!bulk_size) {
-			bulk_size = max_packet > 0 ? (size_t)max_packet * 32 : 32 * 1024;
+		/* Packet size of the bulk endpoint, from the descriptor libuvc parsed already
+		 * (libusb_get_max_packet_size fails on some Android devices). 1024 when unknown:
+		 * a multiple of 1024 is a multiple of 512 too. */
+		size_t packet = 0;
+		{
+			const struct libusb_interface_descriptor *alt0 = interface->altsetting;
+			int ep_idx;
+			for (ep_idx = 0; alt0 && (ep_idx < alt0->bNumEndpoints); ep_idx++) {
+				if (alt0->endpoint[ep_idx].bEndpointAddress == format_desc->parent->bEndpointAddress) {
+					packet = alt0->endpoint[ep_idx].wMaxPacketSize & 0x07ff;
+					break;
+				}
+			}
 		}
-		if ((max_packet > 0) && (bulk_size % max_packet)) {
-			bulk_size += max_packet - (bulk_size % max_packet);
+		if (!packet) packet = 1024;
+		/* Never ask for a whole payload in one transfer: cameras report payloads of a full
+		 * frame (3 MB for 1080p) and 10 such transfers exceed the usbfs memory limit, so
+		 * submitting them failed and streaming never started. */
+		size_t max_payload = strmh->cur_ctrl.dwMaxPayloadTransferSize;
+		if (!max_payload) max_payload = dwMaxVideoFrameSize;
+		size_t bulk_size;
+		if (max_payload <= UVC_BULK_TRANSFER_BYTES) {
+			bulk_size = ((max_payload + packet - 1) / packet) * packet;
+		} else if (!(max_payload % packet)) {
+			/* a full sized payload ends without a short packet: transfers have to divide it */
+			const size_t packets = max_payload / packet;
+			size_t per_transfer = UVC_BULK_TRANSFER_BYTES / packet;
+			while ((per_transfer > 1) && (packets % per_transfer)) per_transfer--;
+			bulk_size = per_transfer * packet;
+		} else {
+			bulk_size = (UVC_BULK_TRANSFER_BYTES / packet) * packet;
 		}
+		if (!bulk_size) bulk_size = packet;
+		strmh->bulk_max_payload = max_payload;
+		strmh->bulk_payload_bytes = 0;
+		strmh->bulk_header_info = 0;
 		strmh->devh->diag.bytes_per_packet = (int32_t)bulk_size;
-		strmh->devh->diag.packets_per_transfer = max_packet;
+		strmh->devh->diag.packets_per_transfer = (int32_t)packet;
 		/** prepare for bulk transfer */
 		for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
 			transfer = libusb_alloc_transfer(0);

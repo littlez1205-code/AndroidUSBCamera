@@ -252,6 +252,9 @@ typedef struct uvc_device_info {
 #define UVC_STOP_TIMEOUT_SEC 6
 /** upper limit of one isochronous transfer, 10 of them must fit into the usbfs memory limit */
 #define UVC_MAX_TRANSFER_BYTES (1024 * 1024)
+/** upper limit of one bulk transfer; payloads larger than this are received in several
+ * transfers and put together again (like the Linux uvcvideo driver does) */
+#define UVC_BULK_TRANSFER_BYTES (64 * 1024)
 
 #define LIBUVC_XFER_BUF_SIZE	( 16 * 1024 * 1024 )
 
@@ -267,6 +270,12 @@ struct uvc_stream_handle {
   uint8_t pending_transfers;
   /** set while the user callback thread exists and still has to be joined */
   uint8_t cb_thread_started;
+  /** bulk: header flags of the payload in progress */
+  uint8_t bulk_header_info;
+  /** bulk: bytes of the payload in progress, 0: the next transfer starts a new payload */
+  size_t bulk_payload_bytes;
+  /** bulk: dwMaxPayloadTransferSize, a payload of this size ends without a short packet */
+  size_t bulk_max_payload;
   /** Current control block */
   struct uvc_stream_ctrl cur_ctrl;
 
