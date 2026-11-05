@@ -127,12 +127,29 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         startConnection()
     }
 
+    override fun onResume() {
+        super.onResume()
+        Log.i(TAG, "onResume")
+        // the surface comes back (surfaceCreated) and streaming restarts on the open card
+        surfaceView.visibility = View.VISIBLE
+        controller.resume()
+    }
+
+    override fun onPause() {
+        Log.i(TAG, "onPause")
+        // Stop streaming while the surface is still shown: once the screen is off or the window
+        // hidden the compositor stops taking buffers and drawing can block. Hiding the
+        // SurfaceView destroys its surface right away, which also wakes up a blocked draw.
+        // The USB connection stays open, coming back only restarts the stream.
+        controller.pause()
+        surfaceView.visibility = View.GONE
+        super.onPause()
+    }
+
     override fun onStop() {
         Log.i(TAG, "onStop")
         started = false
         permissionPending = false
-        currentDevice = null
-        controller.close()
         setKeepScreenOn(false)
         super.onStop()
     }

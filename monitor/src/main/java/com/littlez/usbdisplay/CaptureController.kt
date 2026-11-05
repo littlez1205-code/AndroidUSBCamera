@@ -61,6 +61,8 @@ class CaptureController(context: Context, private val listener: Listener) {
     private var previewing = false
     private var transform = UVCCamera.PREVIEW_TRANSFORM_NONE
     private var status = Status.DISCONNECTED
+    /** false while the app is in the background: the card stays open but nothing is streamed */
+    private var active = true
 
     private val stats = IntArray(UVCCamera.STAT_COUNT)
     private var startTime = 0L
@@ -84,6 +86,27 @@ class CaptureController(context: Context, private val listener: Listener) {
 
     fun close() {
         handler.post { closeInternal() }
+    }
+
+    /**
+     * App leaves the foreground: stop streaming but keep the USB connection, so that coming
+     * back only restarts the stream (the same path as switching the resolution).
+     */
+    fun pause() {
+        handler.post {
+            Log.i(TAG, "pause")
+            active = false
+            stopPreviewInternal()
+        }
+    }
+
+    /** App is in the foreground again: stream again if a card is open and the surface is ready */
+    fun resume() {
+        handler.post {
+            Log.i(TAG, "resume, camera ${if (camera != null) "open" else "closed"}")
+            active = true
+            if (camera != null) startIfReady()
+        }
     }
 
     /** null = surface is going away; waits until drawing has stopped */
@@ -259,7 +282,7 @@ class CaptureController(context: Context, private val listener: Listener) {
     private fun startIfReady() {
         val cam = camera ?: return
         val s = surface ?: return
-        if (previewing || candidates.isEmpty()) return
+        if (!active || previewing || candidates.isEmpty()) return
         // a mode the card rejects right away is skipped immediately
         for (attempt in candidates.indices) {
             val index = (candidateIndex + attempt) % candidates.size
