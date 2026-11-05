@@ -72,6 +72,10 @@ class CaptureController(context: Context, private val listener: Listener) {
 
     private val pollRunnable = Runnable { poll() }
 
+    // diagnostics: finished attempts of this device, newest last
+    private val attempts = ArrayDeque<String>()
+    private var attemptMode: CaptureMode? = null
+
     // ---------------------------------------------------------------- public API
 
     fun open(device: UsbDevice, preferredModeKey: String?) {
@@ -129,6 +133,42 @@ class CaptureController(context: Context, private val listener: Listener) {
         }
     }
 
+    /** diagnostic text of the capture card and the current stream, delivered on the main thread */
+    fun diagnostics(result: (String) -> Unit) {
+        handler.post {
+            val cam = camera
+            if (cam != null) {
+                try {
+                    cam.getPreviewStats(stats)
+                } catch (e: Throwable) {
+                    // keep the last values
+                }
+            }
+            val sb = StringBuilder()
+            sb.append("状态：").append(status.name).append('\n')
+            sb.append("当前模式：").append(activeMode?.key ?: "-")
+                .append(if (preferredKey == null) "（自动）" else "（手动）")
+                .append(if (previewing) "，传输中" else "，未传输").append('\n')
+            if (cam != null) {
+                sb.append("传输方式：").append(transferLine(stats)).append('\n')
+                sb.append("统计：").append(statsLine(stats)).append('\n')
+            }
+            if (attempts.isNotEmpty()) {
+                sb.append("尝试记录：\n")
+                attempts.forEachIndexed { i, a -> sb.append(i + 1).append(". ").append(a).append('\n') }
+            }
+            sb.append("支持的模式：").append(modes.joinToString(", ") { it.key }).append('\n')
+            val raw = try {
+                cam?.supportedSize
+            } catch (e: Throwable) {
+                null
+            }
+            if (raw != null) sb.append("原始描述：").append(raw.take(3000)).append('\n')
+            val text = sb.toString()
+            main.post { result(text) }
+        }
+    }
+
     fun release() {
         handler.post {
             closeInternal()
@@ -159,6 +199,7 @@ class CaptureController(context: Context, private val listener: Listener) {
             camera = cam
             deviceName = device.deviceName
             modes = parsed
+            attempts.clear()
             deviceDeliveredFrames = false
             buildCandidates()
             postModes()
@@ -240,6 +281,7 @@ class CaptureController(context: Context, private val listener: Listener) {
             cam.startPreview()
             previewing = true
             activeMode = mode
+            attemptMode = mode
             val now = SystemClock.elapsedRealtime()
             startTime = now
             lastFrameTime = 0L
@@ -265,6 +307,7 @@ class CaptureController(context: Context, private val listener: Listener) {
         handler.removeCallbacks(pollRunnable)
         if (previewing) {
             Log.i(TAG, "stop preview ${activeMode?.key}")
+            finishAttempt()
             try {
                 camera?.stopPreview()
             } catch (e: Throwable) {
@@ -335,6 +378,41 @@ class CaptureController(context: Context, private val listener: Listener) {
         handler.postDelayed(pollRunnable, POLL_INTERVAL_MS)
     }
 
+    /** remember how the attempt with the current mode went, for the diagnostics */
+    private fun finishAttempt() {
+        val mode = attemptMode ?: return
+        attemptMode = null
+        try {
+            camera?.getPreviewStats(stats)
+        } catch (e: Throwable) {
+            // keep the last values
+        }
+        val seconds = (SystemClock.elapsedRealtime() - startTime) / 1000
+        val line = "${mode.key}（${seconds} 秒）：${transferLine(stats)}；${statsLine(stats)}"
+        Log.i(TAG, "attempt $line")
+        attempts.addLast(line)
+        while (attempts.size > MAX_ATTEMPTS) attempts.removeFirst()
+    }
+
+    private fun transferLine(s: IntArray): String {
+        val iso = s[UVCCamera.STAT_UVC_ISOCHRONOUS] == 1
+        return (if (iso) "等时 alt ${s[UVCCamera.STAT_UVC_ALTSETTING]}" else "批量") +
+            "，每包 ${s[UVCCamera.STAT_UVC_BYTES_PER_PACKET]} 字节 × ${s[UVCCamera.STAT_UVC_PACKETS_PER_TRANSFER]}" +
+            "，协商负载 ${s[UVCCamera.STAT_UVC_PAYLOAD_SIZE]}，最大帧 ${s[UVCCamera.STAT_UVC_FRAME_SIZE]}" +
+            "，USB3 ${if (s[UVCCamera.STAT_UVC_SUPERSPEED] == 1) "是" else "否"}" +
+            "，协商帧率 ${s[UVCCamera.STAT_FPS_X100] / 100f}"
+    }
+
+    private fun statsLine(s: IntArray): String =
+        "启动 ${s[UVCCamera.STAT_UVC_START_RESULT]}/${s[UVCCamera.STAT_STREAM_STATE]}" +
+            "，USB传输 成功 ${s[UVCCamera.STAT_UVC_TRANSFERS_OK]} 失败 ${s[UVCCamera.STAT_UVC_TRANSFERS_FAILED]}" +
+            "（最后 ${s[UVCCamera.STAT_UVC_LAST_TRANSFER_STATUS]}）" +
+            "，数据包 ${s[UVCCamera.STAT_UVC_PACKETS]} 出错 ${s[UVCCamera.STAT_UVC_PACKET_ERRORS]}" +
+            "（最后 ${s[UVCCamera.STAT_UVC_LAST_PACKET_STATUS]}），头部错误 ${s[UVCCamera.STAT_UVC_HEADER_ERRORS]}" +
+            "，拼帧 ${s[UVCCamera.STAT_UVC_FRAMES]} 出错 ${s[UVCCamera.STAT_UVC_FRAMES_ERR]}" +
+            "，数据 ${s[UVCCamera.STAT_UVC_KBYTES]} KB，尺寸不符 ${s[UVCCamera.STAT_FRAMES_REJECTED]}" +
+            "，收到 ${s[UVCCamera.STAT_FRAMES_RECEIVED]} 显示 ${s[UVCCamera.STAT_FRAMES_DRAWN]}"
+
     private fun postModes() {
         val list = modes
         val active = activeMode
@@ -355,5 +433,6 @@ class CaptureController(context: Context, private val listener: Listener) {
         private const val PROBE_TIMEOUT_MS = 4000L
         private const val PROBE_TIMEOUT_SLOW_MS = 10000L
         private const val NO_SIGNAL_MS = 2000L
+        private const val MAX_ATTEMPTS = 8
     }
 }

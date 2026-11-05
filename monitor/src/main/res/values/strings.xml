@@ -8,8 +8,8 @@
     <string name="status_need_usb">没有获得采集卡的 USB 访问权限\n点屏幕重试</string>
     <string name="status_wait_usb">请在弹出的窗口里允许访问采集卡</string>
     <string name="status_connecting">正在连接采集卡…</string>
-    <string name="status_no_signal">没有收到画面\n请检查 HDMI 线，以及电脑是否休眠或没有输出到这块屏幕</string>
-    <string name="status_no_signal_manual">这个模式没有收到画面\n可以点屏幕打开菜单，换一个分辨率或选「自动」</string>
+    <string name="status_no_signal">没有收到画面\n请检查 HDMI 线，以及电脑是否休眠或没有输出到这块屏幕\n点屏幕打开菜单，可以复制「诊断信息」</string>
+    <string name="status_no_signal_manual">这个模式没有收到画面\n可以点屏幕打开菜单，换一个分辨率或选「自动」，或者复制「诊断信息」</string>
     <string name="status_error">%1$s\n点屏幕重试</string>
     <string name="error_open">无法打开采集卡，请拔掉重插一次</string>
     <string name="error_no_modes">采集卡没有可用的画面格式</string>
@@ -31,6 +31,10 @@
 
     <string name="info_stream">%1$d×%2$d %3$s · 采集 %4$.1f 帧/秒 · 显示 %5$.1f 帧/秒 · 每帧 %6$.1f 毫秒</string>
     <string name="info_low_fps">采集卡在这个分辨率最高只给 %1$d 帧，想要 60 帧请在「分辨率」里选低一点的分辨率</string>
+    <string name="menu_diag">诊断信息</string>
+    <string name="diag_title">诊断信息</string>
+    <string name="diag_message">点「复制」把下面的内容发给我，可以看出采集卡传输卡在哪一步。</string>
+
     <string name="crash_title">上次闪退的原因</string>
     <string name="crash_message">上次 App 异常退出了（闪退）。点「复制」把下面的内容复制下来发给我，方便定位问题。</string>
     <string name="crash_copy">复制</string>

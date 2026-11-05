@@ -293,8 +293,8 @@ static jint nativeGetPreviewStats(JNIEnv *env, jobject thiz,
 	jint result = 0;
 	UVCCamera *camera = reinterpret_cast<UVCCamera *>(id_camera);
 	if (LIKELY(camera && stats_array)) {
-		int32_t stats[16];
-		int n = camera->getPreviewStats(stats, 16);
+		int32_t stats[48];
+		int n = camera->getPreviewStats(stats, 48);
 		const jsize len = env->GetArrayLength(stats_array);
 		if (n > len) n = len;
 		if (n > 0) {

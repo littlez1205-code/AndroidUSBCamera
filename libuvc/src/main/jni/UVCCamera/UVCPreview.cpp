@@ -87,6 +87,7 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	mStatFramesDrawn(0),
 	mStatFramesDropped(0),
 	mStatDecodeUsAvg(0),
+	mStatFramesRejected(0),
 	mStreamState(0),
 	mFrameInterval(0) {
 
@@ -321,11 +322,16 @@ int UVCPreview::getPreviewStats(int32_t *stats, int count) {
 		interval ? (int32_t)((1000000000LL + interval / 2) / interval) : 0,	// 7: negotiated fps x 100
 		mStreamState,						// 8: 0: idle, 1: streaming, <0: error
 		mLowLatency ? 1 : 0,				// 9: low latency mode
+		(int32_t)mStatFramesRejected,		// 10: frames with an unexpected size/format
 	};
 	const int n = (int)(sizeof(values) / sizeof(values[0]));
-	const int m = count < n ? count : n;
+	int m = count < n ? count : n;
 	for (int i = 0; i < m; i++) {
 		stats[i] = values[i];
+	}
+	// 11...: libuvc streaming diagnostics (struct uvc_stream_diag)
+	if ((count > m) && mDeviceHandle) {
+		m += uvc_get_stream_diag(mDeviceHandle, stats + m, count - m);
 	}
 	return m;
 }
@@ -533,6 +539,7 @@ void UVCPreview::uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args)
 			frame->frame_format, frame->actual_bytes, preview->frameBytes,
 			frame->width, frame->height, preview->frameWidth, preview->frameHeight);
 #endif
+		preview->mStatFramesRejected++;
 		return;
 	}
 	preview->mStatFramesReceived++;

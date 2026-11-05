@@ -606,6 +606,8 @@ uvc_error_t uvc_probe_stream_ctrl(uvc_device_handle_t *devh,
 static void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
 	uint8_t *tmp_buf;
 
+	strmh->devh->diag.frames++;
+	if (strmh->bfh_err) strmh->devh->diag.frames_err++;
 	pthread_mutex_lock(&strmh->cb_mutex);
 	{
 		/* swap the buffers */
@@ -690,6 +692,11 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 	if (UNLIKELY(!payload || !payload_len || !strmh->outbuf))
 		return;
 
+	strmh->devh->diag.packets++;
+	strmh->devh->diag.byte_remainder += payload_len;
+	strmh->devh->diag.kbytes += strmh->devh->diag.byte_remainder >> 10;
+	strmh->devh->diag.byte_remainder &= 1023;
+
 	/* Certain iSight cameras have strange behavior: They send header
 	 * information in a packet with no image data, and then the following
   	 * packets have only image data, with no more headers until the next frame.
@@ -730,9 +737,9 @@ static void _uvc_process_payload(uvc_stream_handle_t *strmh, const uint8_t *payl
 		if (UNLIKELY(header_info & UVC_STREAM_ERR)) {
 //			strmh->bfh_err |= UVC_STREAM_ERR;
 			UVC_DEBUG("bad packet: error bit set");
-			libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
-//			uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
-			uvc_vs_get_error_code(strmh->devh, &vs_error_code, UVC_GET_CUR);
+			// no clear_halt / get_error_code here: they are synchronous control requests
+			// and this runs on the USB event thread for every payload
+			strmh->devh->diag.header_errors++;
 //			return;
 		}
 
@@ -830,9 +837,10 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 		if (UNLIKELY(pkt->status != 0)) {
 			MARK("bad packet:status=%d,actual_length=%d", pkt->status, pkt->actual_length);
 			strmh->bfh_err |= UVC_STREAM_ERR;
-			libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
-//			uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
-//			uvc_vs_get_error_code(strmh->devh, &vs_error_code, UVC_GET_CUR);
+			// isochronous endpoints never halt: clear_halt (a synchronous control request,
+			// once per bad packet on the USB event thread) only stalled the whole stream
+			strmh->devh->diag.packet_errors++;
+			strmh->devh->diag.last_packet_status = pkt->status;
 			continue;
 		}
 
@@ -841,6 +849,10 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 //			strmh->bfh_err |= UVC_STREAM_ERR;	// don't set this flag here
 			continue;
 		}
+		strmh->devh->diag.packets++;
+		strmh->devh->diag.byte_remainder += pkt->actual_length;
+		strmh->devh->diag.kbytes += strmh->devh->diag.byte_remainder >> 10;
+		strmh->devh->diag.byte_remainder &= 1023;
 		// XXX accessing to pktbuf could lead to crash on the original implementation
 		// because the substances of pktbuf will be deleted in uvc_stream_stop.
 		pktbuf = libusb_get_iso_packet_buffer_simple(transfer, packet_id);
@@ -870,9 +882,8 @@ static inline void _uvc_process_payload_iso(uvc_stream_handle_t *strmh, struct l
 				if (UNLIKELY(header_info & UVC_STREAM_ERR)) {
 //					strmh->bfh_err |= UVC_STREAM_ERR;
 					MARK("bad packet:status=0x%2x", header_info);
-					libusb_clear_halt(strmh->devh->usb_devh, strmh->stream_if->bEndpointAddress);
-//					uvc_vc_get_error_code(strmh->devh, &vc_error_code, UVC_GET_CUR);
-					uvc_vs_get_error_code(strmh->devh, &vs_error_code, UVC_GET_CUR);
+					// no synchronous control requests on the USB event thread
+					strmh->devh->diag.header_errors++;
 					continue;
 				}
 #ifdef USE_EOF
@@ -975,6 +986,12 @@ static void _uvc_stream_callback(struct libusb_transfer *transfer) {
 	if UNLIKELY((++cnt % 1000) == 0)
 		MARK("cnt=%d", cnt);
 #endif
+	if (LIKELY(transfer->status == LIBUSB_TRANSFER_COMPLETED)) {
+		strmh->devh->diag.transfers_ok++;
+	} else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
+		strmh->devh->diag.transfers_failed++;
+		strmh->devh->diag.last_transfer_status = transfer->status;
+	}
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
 		if (UNLIKELY(!strmh->running)) {
@@ -1423,6 +1440,10 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	strmh->pts = 0;
 	strmh->last_scr = 0;
 	strmh->bfh_err = 0;	// XXX
+	memset(&strmh->devh->diag, 0, sizeof(strmh->devh->diag));
+	strmh->devh->diag.start_result = 1;	// in progress
+	strmh->devh->diag.payload_size = strmh->cur_ctrl.dwMaxPayloadTransferSize;
+	strmh->devh->diag.frame_size = strmh->cur_ctrl.dwMaxVideoFrameSize;
 
 	frame_desc = uvc_find_frame_desc_stream(strmh, ctrl->bFormatIndex, ctrl->bFrameIndex);
 	if (UNLIKELY(!frame_desc)) {
@@ -1438,8 +1459,17 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		LOGE("unlnown frame format");
 		goto fail;
 	}
-	const uint32_t dwMaxVideoFrameSize = ctrl->dwMaxVideoFrameSize <= frame_desc->dwMaxVideoFrameBufferSize
+	uint32_t dwMaxVideoFrameSize = ctrl->dwMaxVideoFrameSize <= frame_desc->dwMaxVideoFrameBufferSize
 		? ctrl->dwMaxVideoFrameSize : frame_desc->dwMaxVideoFrameBufferSize;
+	// dwMaxVideoFrameBufferSize is deprecated (UVC 1.5) and may be 0, which made the
+	// minimum 0 and the transfer size 0: never let one missing value win
+	if (!dwMaxVideoFrameSize) {
+		dwMaxVideoFrameSize = ctrl->dwMaxVideoFrameSize ? ctrl->dwMaxVideoFrameSize : frame_desc->dwMaxVideoFrameBufferSize;
+	}
+	if (!dwMaxVideoFrameSize) {
+		dwMaxVideoFrameSize = (uint32_t)frame_desc->wWidth * frame_desc->wHeight * 2;
+	}
+	strmh->devh->diag.frame_size = (int32_t)dwMaxVideoFrameSize;
 
 	// Get the interface that provides the chosen format and frame configuration
 	interface_id = strmh->stream_if->bInterfaceNumber;
@@ -1448,6 +1478,7 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 	/* A VS interface uses isochronous transfers if it has multiple altsettings.
 	 * (UVC 1.5: 2.4.3. VideoStreaming Interface, on page 19) */
 	isochronous = interface->num_altsetting > 1;
+	strmh->devh->diag.isochronous = isochronous ? 1 : 0;
 
 	if (isochronous) {
 		MARK("isochronous transfer mode:num_altsetting=%d", interface->num_altsetting);
@@ -1512,6 +1543,18 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 					endpoint_bytes_per_packet
 						= (endpoint_bytes_per_packet & 0x07ff)
 							* (((endpoint_bytes_per_packet >> 11) & 3) + 1);
+					// SuperSpeed: wMaxPacketSize is always 1024 and the real amount per service
+					// interval (bursts x mult) is in the SuperSpeed endpoint companion descriptor.
+					// Using 1024 makes every packet overflow and no frame is ever complete.
+					struct libusb_ss_endpoint_companion_descriptor *ep_comp = NULL;
+					if ((libusb_get_ss_endpoint_companion_descriptor(strmh->devh->dev->ctx->usb_ctx,
+							endpoint, &ep_comp) == LIBUSB_SUCCESS) && ep_comp) {
+						if (ep_comp->wBytesPerInterval) {
+							endpoint_bytes_per_packet = ep_comp->wBytesPerInterval;
+						}
+						strmh->devh->diag.superspeed = 1;
+						libusb_free_ss_endpoint_companion_descriptor(ep_comp);
+					}
 					break;
 				}
 			}
@@ -1528,8 +1571,16 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 					/* But keep a reasonable limit: Otherwise we start dropping data */
 					if (packets_per_transfer > 32)
 						packets_per_transfer = 32;
+					/* and stay well below the usbfs memory limit (16 MiB for all transfers by default) */
+					while ((packets_per_transfer > 1)
+						&& (packets_per_transfer * endpoint_bytes_per_packet > UVC_MAX_TRANSFER_BYTES)) {
+						packets_per_transfer--;
+					}
 
 					total_transfer_size = packets_per_transfer * endpoint_bytes_per_packet;
+					strmh->devh->diag.altsetting = altsetting->bAlternateSetting;
+					strmh->devh->diag.bytes_per_packet = (int32_t)endpoint_bytes_per_packet;
+					strmh->devh->diag.packets_per_transfer = (int32_t)packets_per_transfer;
 					break;
 				}
 			}
@@ -1578,15 +1629,29 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		}
 	} else {
 		MARK("bulk transfer mode");
+		/* A bulk transfer has to be a multiple of the endpoint's packet size, otherwise every
+		 * full payload overflows it. A payload that is not a multiple ends with a short
+		 * packet anyway, so rounding up never merges two payloads into one transfer. */
+		size_t bulk_size = strmh->cur_ctrl.dwMaxPayloadTransferSize;
+		const int max_packet = libusb_get_max_packet_size(
+			libusb_get_device(strmh->devh->usb_devh), format_desc->parent->bEndpointAddress);
+		if (!bulk_size) {
+			bulk_size = max_packet > 0 ? (size_t)max_packet * 32 : 32 * 1024;
+		}
+		if ((max_packet > 0) && (bulk_size % max_packet)) {
+			bulk_size += max_packet - (bulk_size % max_packet);
+		}
+		strmh->devh->diag.bytes_per_packet = (int32_t)bulk_size;
+		strmh->devh->diag.packets_per_transfer = max_packet;
 		/** prepare for bulk transfer */
 		for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
 			transfer = libusb_alloc_transfer(0);
 			strmh->transfers[transfer_id] = transfer;
-			strmh->transfer_bufs[transfer_id] = malloc(strmh->cur_ctrl.dwMaxPayloadTransferSize);
+			strmh->transfer_bufs[transfer_id] = malloc(bulk_size);
 			libusb_fill_bulk_transfer(transfer, strmh->devh->usb_devh,
 				format_desc->parent->bEndpointAddress,
 				strmh->transfer_bufs[transfer_id],
-				strmh->cur_ctrl.dwMaxPayloadTransferSize, _uvc_stream_callback,
+				bulk_size, _uvc_stream_callback,
 				(void *)strmh, 5000);
 		}
 	}
@@ -1627,13 +1692,32 @@ uvc_error_t uvc_stream_start_bandwidth(uvc_stream_handle_t *strmh,
 		goto fail;
 	}
 
+	strmh->devh->diag.start_result = ret;
 	UVC_EXIT(ret);
 	return ret;
 fail:
 	LOGE("fail");
+	strmh->devh->diag.start_result = ret ? ret : -1;
 	strmh->running = 0;
 	UVC_EXIT(ret);
 	return ret;
+}
+
+int uvc_get_stream_diag(uvc_device_handle_t *devh, int32_t *values, int count) {
+	if (!devh || !values || (count <= 0)) return 0;
+	const struct uvc_stream_diag *d = &devh->diag;
+	const int32_t v[] = {
+		d->start_result, d->isochronous, d->altsetting, d->bytes_per_packet,
+		d->packets_per_transfer, d->payload_size, d->frame_size, d->superspeed,
+		(int32_t)d->transfers_ok, (int32_t)d->transfers_failed, d->last_transfer_status,
+		(int32_t)d->packets, (int32_t)d->packet_errors, d->last_packet_status,
+		(int32_t)d->header_errors, (int32_t)d->frames, (int32_t)d->frames_err, (int32_t)d->kbytes,
+	};
+	const int n = (int)(sizeof(v) / sizeof(v[0]));
+	const int m = count < n ? count : n;
+	int i;
+	for (i = 0; i < m; i++) values[i] = v[i];
+	return m;
 }
 
 /** Begin streaming video from the stream into the callback function.

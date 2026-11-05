@@ -122,6 +122,7 @@ private:
 	volatile uint32_t mStatFramesDrawn;
 	volatile uint32_t mStatFramesDropped;
 	volatile uint32_t mStatDecodeUsAvg;
+	volatile uint32_t mStatFramesRejected;
 	volatile int32_t mStreamState;
 	volatile uint32_t mFrameInterval;
 	int windowFormat() const;

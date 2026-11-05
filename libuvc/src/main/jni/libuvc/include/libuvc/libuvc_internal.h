@@ -250,6 +250,8 @@ typedef struct uvc_device_info {
 #define LIBUVC_NUM_TRANSFER_BUFS 10
 /** how long uvc_stream_stop waits for cancelled transfers, longer than the 5 sec transfer timeout */
 #define UVC_STOP_TIMEOUT_SEC 6
+/** upper limit of one isochronous transfer, 10 of them must fit into the usbfs memory limit */
+#define UVC_MAX_TRANSFER_BYTES (1024 * 1024)
 
 #define LIBUVC_XFER_BUF_SIZE	( 16 * 1024 * 1024 )
 
@@ -294,6 +296,29 @@ struct uvc_stream_handle {
  *
  * @todo move most of this into a uvc_device struct?
  */
+/** counters and settings of the last stream, see uvc_get_stream_diag */
+struct uvc_stream_diag {
+  int32_t start_result;			/**< result of the last uvc_stream_start */
+  int32_t isochronous;			/**< 1: isochronous, 0: bulk */
+  int32_t altsetting;			/**< chosen alt setting (isochronous) */
+  int32_t bytes_per_packet;		/**< bytes per packet / service interval */
+  int32_t packets_per_transfer;
+  int32_t payload_size;			/**< dwMaxPayloadTransferSize agreed with the camera */
+  int32_t frame_size;			/**< dwMaxVideoFrameSize */
+  int32_t superspeed;			/**< 1: endpoint has a SuperSpeed companion descriptor */
+  volatile uint32_t transfers_ok;
+  volatile uint32_t transfers_failed;
+  volatile int32_t last_transfer_status;
+  volatile uint32_t packets;		/**< payload packets with data */
+  volatile uint32_t packet_errors;	/**< isochronous packets with an error status */
+  volatile int32_t last_packet_status;
+  volatile uint32_t header_errors;	/**< payload headers with the error bit set */
+  volatile uint32_t frames;		/**< frames assembled */
+  volatile uint32_t frames_err;		/**< frames dropped because of errors */
+  volatile uint32_t kbytes;		/**< payload data received [KiB] */
+  uint32_t byte_remainder;
+};
+
 struct uvc_device_handle {
   struct uvc_device *dev;
   struct uvc_device_handle *prev, *next;
@@ -314,6 +339,9 @@ struct uvc_device_handle {
   /** Whether the camera is an iSight that sends one header per frame */
   uint8_t is_isight;
   uint8_t reset_on_release_if;	// XXX whether interface alt setting needs to reset to 0.
+  /** streaming diagnostics; kept in the device handle (not the stream) so that they can be
+   * read safely while streams are opened and closed */
+  struct uvc_stream_diag diag;
 };
 
 /** Context within which we communicate with devices */

@@ -348,6 +348,9 @@ object CrashLog {
         return text.substring(start).lineSequence().take(40).joinToString("\n")
     }
 
+    /** time, app version, device and state lines, as used at the top of a report */
+    fun header(context: Context): String = header(context.applicationContext, System.currentTimeMillis())
+
     private fun header(app: Context, time: Long): String {
         val date = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(time))
         val version = try {

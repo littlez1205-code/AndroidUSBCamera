@@ -77,7 +77,28 @@ public class UVCCamera {
 	public static final int STAT_FPS_X100 = 7;
 	public static final int STAT_STREAM_STATE = 8;
 	public static final int STAT_LOW_LATENCY = 9;
-	public static final int STAT_COUNT = 10;		// = YVU420SemiPlanar,NV21，但是保存到jpg颜色失真
+	/** frames dropped because size or format did not match the negotiated mode */
+	public static final int STAT_FRAMES_REJECTED = 10;
+	/** libuvc streaming diagnostics of the current / last stream */
+	public static final int STAT_UVC_START_RESULT = 11;
+	public static final int STAT_UVC_ISOCHRONOUS = 12;
+	public static final int STAT_UVC_ALTSETTING = 13;
+	public static final int STAT_UVC_BYTES_PER_PACKET = 14;
+	public static final int STAT_UVC_PACKETS_PER_TRANSFER = 15;
+	public static final int STAT_UVC_PAYLOAD_SIZE = 16;
+	public static final int STAT_UVC_FRAME_SIZE = 17;
+	public static final int STAT_UVC_SUPERSPEED = 18;
+	public static final int STAT_UVC_TRANSFERS_OK = 19;
+	public static final int STAT_UVC_TRANSFERS_FAILED = 20;
+	public static final int STAT_UVC_LAST_TRANSFER_STATUS = 21;
+	public static final int STAT_UVC_PACKETS = 22;
+	public static final int STAT_UVC_PACKET_ERRORS = 23;
+	public static final int STAT_UVC_LAST_PACKET_STATUS = 24;
+	public static final int STAT_UVC_HEADER_ERRORS = 25;
+	public static final int STAT_UVC_FRAMES = 26;
+	public static final int STAT_UVC_FRAMES_ERR = 27;
+	public static final int STAT_UVC_KBYTES = 28;
+	public static final int STAT_COUNT = 29;		// = YVU420SemiPlanar,NV21，但是保存到jpg颜色失真
 
 	//--------------------------------------------------------------------------------
     public static final int	CTRL_SCANNING		= 0x00000001;	// D0:  Scanning Mode

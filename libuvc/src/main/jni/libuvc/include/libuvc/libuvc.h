@@ -803,6 +803,9 @@ uvc_error_t uvc_mjpeg2rgbx(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 uvc_error_t uvc_mjpeg2yuyv(uvc_frame_t *in, uvc_frame_t *out);		// XXX
 #endif
 
+/** copy streaming diagnostics of the device handle (see struct uvc_stream_diag), returns the count */
+int uvc_get_stream_diag(uvc_device_handle_t *devh, int32_t *values, int count);
+
 /** Reusable MJPEG decoder writing RGBA pixels into a caller supplied buffer.
  * Declared outside of LIBUVC_HAS_JPEG because frame-mjpeg.c includes this
  * header before localdefines.h defines that macro. */

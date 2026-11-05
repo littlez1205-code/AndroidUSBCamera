@@ -61,6 +61,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     private lateinit var modeButton: Button
     private lateinit var scaleButton: Button
     private lateinit var rotateButton: Button
+    private lateinit var diagButton: Button
 
     private lateinit var prefs: SharedPreferences
     private lateinit var controller: CaptureController
@@ -386,12 +387,14 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         modeButton = menuButton { showModeDialog() }
         scaleButton = menuButton { toggleStretch() }
         rotateButton = menuButton { cycleRotation() }
+        diagButton = menuButton { showDiagnostics() }
         buttonRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             addView(modeButton)
             addView(scaleButton)
             addView(rotateButton)
+            addView(diagButton)
         }
         menuPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -476,6 +479,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
 
     private fun updateMenuLabels() {
         modeButton.setText(R.string.menu_mode)
+        diagButton.setText(R.string.menu_diag)
         scaleButton.setText(if (stretch) R.string.menu_stretch else R.string.menu_fit)
         rotateButton.setText(when (rotation) {
             ROTATION_CW -> R.string.menu_portrait_cw
@@ -653,7 +657,12 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         } catch (e: Exception) {
             null
         }
-        return String.format(Locale.US, "%s (%04x:%04x)", name ?: "?", device.vendorId, device.productId)
+        val usb = try {
+            device.version
+        } catch (e: Exception) {
+            null
+        }
+        return String.format(Locale.US, "%s (%04x:%04x) USB %s", name ?: "?", device.vendorId, device.productId, usb ?: "?")
     }
 
     /** remembered for the crash report: which card and settings were in use */
@@ -665,6 +674,22 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
 
     private fun showCrashReport(report: String) {
         holdConnection = true
+        showReportDialog(R.string.crash_title, R.string.crash_message, report) {
+            holdConnection = false
+            hideSystemBars()
+            startConnection()
+        }
+    }
+
+    private fun showDiagnostics() {
+        controller.diagnostics { text ->
+            if (isFinishing || isDestroyed) return@diagnostics
+            val report = CrashLog.header(this) + "采集卡：$deviceLabel\n" + text
+            showReportDialog(R.string.diag_title, R.string.diag_message, report) { hideSystemBars() }
+        }
+    }
+
+    private fun showReportDialog(title: Int, message: Int, report: String, onDismiss: () -> Unit) {
         val text = TextView(this).apply {
             this.text = report
             setTextIsSelectable(true)
@@ -674,8 +699,8 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         }
         val scroll = ScrollView(this).apply { addView(text) }
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(R.string.crash_title)
-            .setMessage(R.string.crash_message)
+            .setTitle(title)
+            .setMessage(message)
             .setView(scroll)
             .setPositiveButton(R.string.crash_copy) { _, _ ->
                 try {
@@ -686,11 +711,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
                 }
             }
             .setNegativeButton(R.string.crash_close, null)
-            .setOnDismissListener {
-                holdConnection = false
-                hideSystemBars()
-                startConnection()
-            }
+            .setOnDismissListener { onDismiss() }
             .show()
     }
 
