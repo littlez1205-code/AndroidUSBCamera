@@ -58,7 +58,7 @@ public class UVCCamera {
 	public static final int PIXEL_FORMAT_RGB565 = 2;
 	public static final int PIXEL_FORMAT_RGBX = 3;
 	public static final int PIXEL_FORMAT_YUV420SP = 4;	// NV12
-	public static final int PIXEL_FORMAT_NV21 = 5;
+	public static final int PIXEL_FORMAT_NV21 = 5;		// = YVU420SemiPlanar,NV21，但是保存到jpg颜色失真
 
 	/** preview buffer transforms, same values as ANATIVEWINDOW_TRANSFORM_* (needs Android 8.0+) */
 	public static final int PREVIEW_TRANSFORM_NONE = 0x00;
@@ -83,26 +83,28 @@ public class UVCCamera {
 	public static final int STAT_DECODE_TIME_US = 11;
 	/** part of STAT_DRAW_TIME_US spent waiting for the compositor (free buffer, queueing) [us] */
 	public static final int STAT_WAIT_TIME_US = 12;
+	/** frames not decoded / drawn again because their data did not change (static picture) */
+	public static final int STAT_FRAMES_UNCHANGED = 13;
 	/** libuvc streaming diagnostics of the current / last stream */
-	public static final int STAT_UVC_START_RESULT = 13;
-	public static final int STAT_UVC_ISOCHRONOUS = 14;
-	public static final int STAT_UVC_ALTSETTING = 15;
-	public static final int STAT_UVC_BYTES_PER_PACKET = 16;
-	public static final int STAT_UVC_PACKETS_PER_TRANSFER = 17;
-	public static final int STAT_UVC_PAYLOAD_SIZE = 18;
-	public static final int STAT_UVC_FRAME_SIZE = 19;
-	public static final int STAT_UVC_SUPERSPEED = 20;
-	public static final int STAT_UVC_TRANSFERS_OK = 21;
-	public static final int STAT_UVC_TRANSFERS_FAILED = 22;
-	public static final int STAT_UVC_LAST_TRANSFER_STATUS = 23;
-	public static final int STAT_UVC_PACKETS = 24;
-	public static final int STAT_UVC_PACKET_ERRORS = 25;
-	public static final int STAT_UVC_LAST_PACKET_STATUS = 26;
-	public static final int STAT_UVC_HEADER_ERRORS = 27;
-	public static final int STAT_UVC_FRAMES = 28;
-	public static final int STAT_UVC_FRAMES_ERR = 29;
-	public static final int STAT_UVC_KBYTES = 30;
-	public static final int STAT_COUNT = 31;		// = YVU420SemiPlanar,NV21，但是保存到jpg颜色失真
+	public static final int STAT_UVC_START_RESULT = 14;
+	public static final int STAT_UVC_ISOCHRONOUS = 15;
+	public static final int STAT_UVC_ALTSETTING = 16;
+	public static final int STAT_UVC_BYTES_PER_PACKET = 17;
+	public static final int STAT_UVC_PACKETS_PER_TRANSFER = 18;
+	public static final int STAT_UVC_PAYLOAD_SIZE = 19;
+	public static final int STAT_UVC_FRAME_SIZE = 20;
+	public static final int STAT_UVC_SUPERSPEED = 21;
+	public static final int STAT_UVC_TRANSFERS_OK = 22;
+	public static final int STAT_UVC_TRANSFERS_FAILED = 23;
+	public static final int STAT_UVC_LAST_TRANSFER_STATUS = 24;
+	public static final int STAT_UVC_PACKETS = 25;
+	public static final int STAT_UVC_PACKET_ERRORS = 26;
+	public static final int STAT_UVC_LAST_PACKET_STATUS = 27;
+	public static final int STAT_UVC_HEADER_ERRORS = 28;
+	public static final int STAT_UVC_FRAMES = 29;
+	public static final int STAT_UVC_FRAMES_ERR = 30;
+	public static final int STAT_UVC_KBYTES = 31;
+	public static final int STAT_COUNT = 32;
 
 	//--------------------------------------------------------------------------------
     public static final int	CTRL_SCANNING		= 0x00000001;	// D0:  Scanning Mode

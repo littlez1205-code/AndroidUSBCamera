@@ -68,6 +68,10 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     private val usbManager by lazy { getSystemService(Context.USB_SERVICE) as UsbManager }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val hideMenuRunnable = Runnable { hideMenu() }
+    /** no picture for a while (computer asleep): let the screen turn off as the system decides */
+    private val allowScreenOffRunnable = Runnable {
+        if (captureStatus == CaptureController.Status.NO_SIGNAL) setKeepScreenOn(false)
+    }
 
     private var started = false
     private var currentDevice: UsbDevice? = null
@@ -299,6 +303,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
     override fun onStatus(status: CaptureController.Status, error: String?) {
         val previous = captureStatus
         captureStatus = status
+        if (status != CaptureController.Status.NO_SIGNAL) mainHandler.removeCallbacks(allowScreenOffRunnable)
         when (status) {
             CaptureController.Status.DISCONNECTED -> setKeepScreenOn(false)
             CaptureController.Status.CONNECTING -> {
@@ -317,7 +322,12 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
             }
             CaptureController.Status.NO_SIGNAL -> {
                 showMessage(getString(if (autoMode) R.string.status_no_signal else R.string.status_no_signal_manual))
-                setKeepScreenOn(true)
+                if (previous != CaptureController.Status.NO_SIGNAL) {
+                    // keep the screen on for a while, then the normal screen timeout applies again
+                    setKeepScreenOn(true)
+                    mainHandler.removeCallbacks(allowScreenOffRunnable)
+                    mainHandler.postDelayed(allowScreenOffRunnable, NO_SIGNAL_SCREEN_ON_MS)
+                }
             }
             CaptureController.Status.ERROR -> {
                 showMessage(getString(R.string.status_error, error ?: getString(R.string.error_open)))
@@ -516,6 +526,9 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         if (stats != null && captureStatus == CaptureController.Status.STREAMING) {
             lines.add(getString(R.string.info_stream, stats.mode.width, stats.mode.height,
                 formatLabel(stats.mode.format), stats.captureFps, stats.displayFps))
+            if (stats.unchangedFps >= 0.05f) {
+                lines.add(getString(R.string.info_unchanged, stats.unchangedFps))
+            }
             lines.add(getString(R.string.info_frame_time, stats.decodeMs, stats.waitMs))
             val negotiated = stats.negotiatedFps.roundToInt()
             if (negotiated in 1 until CaptureMode.MIN_SMOOTH_FPS) {
@@ -760,6 +773,7 @@ class MonitorActivity : Activity(), CaptureController.Listener, SurfaceHolder.Ca
         private const val REQUEST_CAMERA = 1
         private const val ATTACH_DELAY_MS = 1000L
         private const val MENU_TIMEOUT_MS = 6000L
+        private const val NO_SIGNAL_SCREEN_ON_MS = 2 * 60 * 1000L
 
         private const val PREFS = "display"
         private const val KEY_MODE = "mode"

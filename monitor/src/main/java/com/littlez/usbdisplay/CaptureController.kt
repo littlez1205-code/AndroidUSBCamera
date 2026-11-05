@@ -28,8 +28,10 @@ class CaptureController(context: Context, private val listener: Listener) {
         val negotiatedFps: Float,
         /** frames per second coming from the card */
         val captureFps: Float,
-        /** frames per second drawn on the screen */
+        /** frames per second up to date on the screen (drawn + unchanged ones) */
         val displayFps: Float,
+        /** part of displayFps that was not decoded / drawn again because the picture did not change */
+        val unchangedFps: Float,
         /** average time to decode and draw one frame */
         val drawMs: Float,
         /** part of drawMs spent decoding / converting */
@@ -75,6 +77,7 @@ class CaptureController(context: Context, private val listener: Listener) {
     private var lastStatsTime = 0L
     private var lastStatsReceived = 0
     private var lastStatsDrawn = 0
+    private var lastStatsUnchanged = 0
 
     private val pollRunnable = Runnable { poll() }
 
@@ -317,6 +320,7 @@ class CaptureController(context: Context, private val listener: Listener) {
             lastStatsTime = now
             lastStatsReceived = stats[UVCCamera.STAT_FRAMES_RECEIVED]
             lastStatsDrawn = stats[UVCCamera.STAT_FRAMES_DRAWN]
+            lastStatsUnchanged = stats[UVCCamera.STAT_FRAMES_UNCHANGED]
             Log.i(TAG, "preview started: ${mode.key}")
             main.post { listener.onFrameSize(mode.width, mode.height) }
             postModes()
@@ -358,6 +362,7 @@ class CaptureController(context: Context, private val listener: Listener) {
         val now = SystemClock.elapsedRealtime()
         val received = stats[UVCCamera.STAT_FRAMES_RECEIVED]
         val drawn = stats[UVCCamera.STAT_FRAMES_DRAWN]
+        val unchanged = stats[UVCCamera.STAT_FRAMES_UNCHANGED]
         val streamState = stats[UVCCamera.STAT_STREAM_STATE]
 
         if (received != lastReceivedSeen) {
@@ -392,12 +397,14 @@ class CaptureController(context: Context, private val listener: Listener) {
         val dt = now - lastStatsTime
         if (dt >= STATS_INTERVAL_MS) {
             val captureFps = (received - lastStatsReceived) * 1000f / dt
-            val displayFps = (drawn - lastStatsDrawn) * 1000f / dt
+            val unchangedFps = (unchanged - lastStatsUnchanged) * 1000f / dt
+            val displayFps = (drawn - lastStatsDrawn) * 1000f / dt + unchangedFps
             val result = Stats(
                 mode = mode,
                 negotiatedFps = stats[UVCCamera.STAT_FPS_X100] / 100f,
                 captureFps = captureFps,
                 displayFps = displayFps,
+                unchangedFps = unchangedFps,
                 drawMs = stats[UVCCamera.STAT_DRAW_TIME_US] / 1000f,
                 decodeMs = stats[UVCCamera.STAT_DECODE_TIME_US] / 1000f,
                 waitMs = stats[UVCCamera.STAT_WAIT_TIME_US] / 1000f,
@@ -405,6 +412,7 @@ class CaptureController(context: Context, private val listener: Listener) {
             lastStatsTime = now
             lastStatsReceived = received
             lastStatsDrawn = drawn
+            lastStatsUnchanged = unchanged
             main.post { listener.onStats(result) }
         }
         handler.postDelayed(pollRunnable, POLL_INTERVAL_MS)
@@ -449,6 +457,7 @@ class CaptureController(context: Context, private val listener: Listener) {
             "，拼帧 ${s[UVCCamera.STAT_UVC_FRAMES]} 出错 ${s[UVCCamera.STAT_UVC_FRAMES_ERR]}" +
             "，数据 ${s[UVCCamera.STAT_UVC_KBYTES]} KB，尺寸不符 ${s[UVCCamera.STAT_FRAMES_REJECTED]}" +
             "，收到 ${s[UVCCamera.STAT_FRAMES_RECEIVED]} 显示 ${s[UVCCamera.STAT_FRAMES_DRAWN]}" +
+            " 未变化跳过 ${s[UVCCamera.STAT_FRAMES_UNCHANGED]}" +
             "，每帧 解码 ${s[UVCCamera.STAT_DECODE_TIME_US] / 1000f} 等屏幕 ${s[UVCCamera.STAT_WAIT_TIME_US] / 1000f} 毫秒"
 
     private fun postModes() {

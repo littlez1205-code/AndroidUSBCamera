@@ -125,6 +125,16 @@ private:
 	volatile uint32_t mStatFramesRejected;
 	volatile uint32_t mStatWorkUsAvg;
 	volatile uint32_t mStatWaitUsAvg;
+	volatile uint32_t mStatFramesUnchanged;
+	// last frame drawn by the low latency path: a frame with identical data is not decoded
+	// and drawn again (static desktop). Only used on the preview thread.
+	uint8_t *mLastFrameData;
+	size_t mLastFrameCapacity;
+	size_t mLastFrameBytes;
+	ANativeWindow *mLastFrameWindow;	// compared by address only
+	uint32_t mLastFrameGeneration;
+	// incremented whenever the screen content has to be drawn again (new window, transform...)
+	volatile uint32_t mDisplayGeneration;
 	volatile int32_t mStreamState;
 	volatile uint32_t mFrameInterval;
 	int windowFormat() const;

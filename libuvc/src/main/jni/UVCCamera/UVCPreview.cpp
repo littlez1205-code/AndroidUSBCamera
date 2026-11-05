@@ -52,6 +52,8 @@
 
 #define	LOCAL_DEBUG 0
 #define MAX_FRAME 4
+// largest frame kept to detect unchanged frames (1080p YUYV is about 4 MB)
+#define MAX_REMEMBERED_FRAME_BYTES (8 * 1024 * 1024)
 #define PREVIEW_PIXEL_BYTES 4	// RGBA/RGBX
 #define FRAME_POOL_SZ MAX_FRAME + 2
 
@@ -90,6 +92,13 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	mStatFramesRejected(0),
 	mStatWorkUsAvg(0),
 	mStatWaitUsAvg(0),
+	mStatFramesUnchanged(0),
+	mLastFrameData(NULL),
+	mLastFrameCapacity(0),
+	mLastFrameBytes(0),
+	mLastFrameWindow(NULL),
+	mLastFrameGeneration(0),
+	mDisplayGeneration(1),
 	mStreamState(0),
 	mFrameInterval(0) {
 
@@ -122,6 +131,8 @@ UVCPreview::~UVCPreview() {
 		uvc_mjpeg_decoder_destroy(mMjpegDecoder);
 		mMjpegDecoder = NULL;
 	}
+	free(mLastFrameData);
+	mLastFrameData = NULL;
 	pthread_mutex_lock(&preview_mutex);
 	pthread_mutex_destroy(&preview_mutex);
 	pthread_cond_destroy(&preview_sync);
@@ -238,6 +249,7 @@ int UVCPreview::setPreviewDisplay(ANativeWindow *preview_window) {
 			if (mPreviewWindow)
 				ANativeWindow_release(mPreviewWindow);
 			mPreviewWindow = preview_window;
+			mDisplayGeneration++;	// new window: draw the next frame even if it did not change
 			if (LIKELY(mPreviewWindow)) {
 				ANativeWindow_setBuffersGeometry(mPreviewWindow,
 					frameWidth, frameHeight, windowFormat());
@@ -290,6 +302,7 @@ int UVCPreview::setLowLatencyMode(bool enable) {
 	pthread_mutex_lock(&preview_mutex);
 	{
 		mLowLatency = enable;
+		mDisplayGeneration++;
 		if (mPreviewWindow) {
 			ANativeWindow_setBuffersGeometry(mPreviewWindow,
 				frameWidth, frameHeight, windowFormat());
@@ -304,6 +317,8 @@ int UVCPreview::setPreviewTransform(int transform) {
 	pthread_mutex_lock(&preview_mutex);
 	{
 		mPreviewTransform = transform;
+		// the transform only applies to buffers queued from now on
+		mDisplayGeneration++;
 		applyBuffersTransform(mPreviewWindow);
 	}
 	pthread_mutex_unlock(&preview_mutex);
@@ -327,13 +342,14 @@ int UVCPreview::getPreviewStats(int32_t *stats, int count) {
 		(int32_t)mStatFramesRejected,		// 10: frames with an unexpected size/format
 		(int32_t)mStatWorkUsAvg,			// 11: decode / convert time per frame [us]
 		(int32_t)mStatWaitUsAvg,			// 12: time waiting for the compositor per frame [us]
+		(int32_t)mStatFramesUnchanged,		// 13: frames not drawn because they did not change
 	};
 	const int n = (int)(sizeof(values) / sizeof(values[0]));
 	int m = count < n ? count : n;
 	for (int i = 0; i < m; i++) {
 		stats[i] = values[i];
 	}
-	// 13...: libuvc streaming diagnostics (struct uvc_stream_diag)
+	// 14...: libuvc streaming diagnostics (struct uvc_stream_diag)
 	if ((count > m) && mDeviceHandle) {
 		m += uvc_get_stream_diag(mDeviceHandle, stats + m, count - m);
 	}
@@ -674,6 +690,7 @@ int UVCPreview::prepare_preview(uvc_stream_ctrl_t *ctrl) {
 			frameHeight = requestHeight;
 		}
 		mFrameInterval = ctrl->dwFrameInterval;
+		mDisplayGeneration++;	// new stream
 		LOGI("frameInterval=%u(%d..%d fps requested)", ctrl->dwFrameInterval, requestMinFps, requestMaxFps);
 		frameMode = requestMode;
 		frameBytes = frameWidth * frameHeight * (!requestMode ? 2 : 4);
@@ -857,6 +874,19 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 		return -1;
 	}
 
+	// Static desktop: the camera sends the same compressed data again. Comparing costs a few
+	// tens of microseconds, decoding and drawing it again costs milliseconds.
+	const uint32_t generation = mDisplayGeneration;
+	const size_t frame_bytes = frame->actual_bytes;
+	if (mLastFrameData && frame_bytes && (frame_bytes == mLastFrameBytes)
+		&& (window == mLastFrameWindow) && (generation == mLastFrameGeneration)
+		&& !memcmp(frame->data, mLastFrameData, frame_bytes)) {
+
+		ANativeWindow_release(window);
+		mStatFramesUnchanged++;
+		return 0;
+	}
+
 	const int64_t start = monotonic_us();
 	int64_t wait_us = 0;	// time spent waiting for the compositor (free buffer / queueing)
 	int64_t t;
@@ -889,6 +919,7 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 					// follow the stream so that the next frames fit the window buffers
 					LOGW("jpeg size %dx%d differs from window %dx%d", w, h, buffer.width, buffer.height);
 					ANativeWindow_setBuffersGeometry(window, w, h, windowFormat());
+					mDisplayGeneration++;	// a buffer without the picture was posted
 				}
 			}
 		}
@@ -913,6 +944,28 @@ int UVCPreview::draw_low_latency(uvc_frame_t *frame) {
 				ANativeWindow_unlockAndPost(window);
 				wait_us += monotonic_us() - t;
 			}
+		}
+	}
+	if (LIKELY(!result)) {
+		// remember what is on screen now
+		if (frame_bytes <= MAX_REMEMBERED_FRAME_BYTES) {
+			if (mLastFrameCapacity < frame_bytes) {
+				uint8_t *p = (uint8_t *)realloc(mLastFrameData, frame_bytes);
+				if (p) {
+					mLastFrameData = p;
+					mLastFrameCapacity = frame_bytes;
+				}
+			}
+			if (mLastFrameData && (mLastFrameCapacity >= frame_bytes)) {
+				memcpy(mLastFrameData, frame->data, frame_bytes);
+				mLastFrameBytes = frame_bytes;
+				mLastFrameWindow = window;
+				mLastFrameGeneration = generation;
+			} else {
+				mLastFrameBytes = 0;
+			}
+		} else {
+			mLastFrameBytes = 0;
 		}
 	}
 	ANativeWindow_release(window);
@@ -952,6 +1005,10 @@ void UVCPreview::do_preview_low_latency() {
 		uvc_mjpeg_decoder_destroy(mMjpegDecoder);
 		mMjpegDecoder = NULL;
 	}
+	free(mLastFrameData);
+	mLastFrameData = NULL;
+	mLastFrameCapacity = mLastFrameBytes = 0;
+	mLastFrameWindow = NULL;
 
 	EXIT();
 }
